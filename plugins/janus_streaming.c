@@ -7871,6 +7871,10 @@ static void *janus_streaming_relay_thread(void *data) {
 						JANUS_LOG(LOG_WARN, "[%s] RTP collision on audio mountpoint, dropping packet (ssrc=%"SCNu32")\n", name, ssrc);
 						continue;
 					}
+                                        if (a_last_ssrc && ssrc == a_last_ssrc && (now - source->last_received_audio)>(gint64)1000*500){
+                                                JANUS_LOG(LOG_INFO, "[%s] RTP paused more than 500ms. Assuming it's a new stream. Swith ssrc for one packet to prevent srtp_err_status_replay_old error. \n", name);
+                                                ssrc = ssrc + 1;
+                                        }
 					source->last_received_audio = now;
 					//~ JANUS_LOG(LOG_VERB, "************************\nGot %d bytes on the audio channel...\n", bytes);
 					/* Do we have a new stream? */
