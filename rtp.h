@@ -195,6 +195,22 @@ int janus_rtp_header_extension_parse_mid(char *buf, int len, int id,
 int janus_rtp_header_extension_parse_rid(char *buf, int len, int id,
 	char *sdes_item, int sdes_len);
 
+/*! \brief Helper to parse an abs-send-time RTP extension (http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time)
+ * @param[in] buf The packet data
+ * @param[in] len The packet data length in bytes
+ * @param[in] id The extension ID to look for
+ * @param[out] abs_ts Variable where the parsed abs-send-time value will be stored
+ * @returns 0 if found, -1 otherwise */
+int janus_rtp_header_extension_parse_abs_sent_time(char *buf, int len, int id, uint32_t *abs_ts);
+
+/*! \brief Helper to set an abs-send-time RTP extension (http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time)
+ * @param[in] buf The packet data
+ * @param[in] len The packet data length in bytes
+ * @param[in] id The extension ID to look for
+ * @param[out] abs_ts Absolute Send Time value to set
+ * @returns 0 if found, -1 otherwise */
+int janus_rtp_header_extension_set_abs_send_time(char *buf, int len, int id, uint32_t abs_ts);
+
 /*! \brief Helper to parse a transport wide sequence number (https://tools.ietf.org/html/draft-holmer-rmcat-transport-wide-cc-extensions-01)
  * @param[in] buf The packet data
  * @param[in] len The packet data length in bytes
@@ -226,8 +242,8 @@ typedef struct janus_rtp_switching_context {
 			v_last_ssrc, v_last_ts, v_base_ts, v_base_ts_prev, v_prev_ts, v_target_ts, v_start_ts;
 	uint16_t a_last_seq, a_prev_seq, a_base_seq, a_base_seq_prev,
 			v_last_seq, v_prev_seq, v_base_seq, v_base_seq_prev;
-	gboolean a_seq_reset, a_new_ssrc,
-			v_seq_reset, v_new_ssrc;
+	gboolean a_ts_reset, a_seq_reset, a_new_ssrc,
+			v_ts_reset, v_seq_reset, v_new_ssrc;
 	gint16 a_seq_offset,
 			v_seq_offset;
 	gint32 a_prev_delay, a_active_delay, a_ts_offset,

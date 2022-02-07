@@ -4898,33 +4898,33 @@ done:
 			g_snprintf(buffer, 512,
 				"v=0\r\no=%s %"SCNu64" %"SCNu64" IN IP4 127.0.0.1\r\n",
 					"-", session->sdp_sessid, session->sdp_version);
-			g_strlcat(sdptemp, buffer, 2048);
+			janus_strlcat(sdptemp, buffer, 2048);
 			g_snprintf(buffer, 512,
 				"s=Mountpoint %s\r\n", mp->id_str);
-			g_strlcat(sdptemp, buffer, 2048);
-			g_strlcat(sdptemp, "t=0 0\r\n", 2048);
+			janus_strlcat(sdptemp, buffer, 2048);
+			janus_strlcat(sdptemp, "t=0 0\r\n", 2048);
 			if(mp->codecs.audio_pt >= 0 && session->audio) {
 				int pt = session->audio_pt >= 0 ? session->audio_pt : mp->codecs.audio_pt;
 				/* Add audio line */
 				g_snprintf(buffer, 512,
 					"m=audio 1 RTP/SAVPF %d\r\n"
 					"c=IN IP4 1.1.1.1\r\n", pt);
-				g_strlcat(sdptemp, buffer, 2048);
+				janus_strlcat(sdptemp, buffer, 2048);
 				if(mp->codecs.audio_rtpmap) {
 					g_snprintf(buffer, 512,
 						"a=rtpmap:%d %s\r\n",
 						pt, mp->codecs.audio_rtpmap);
-					g_strlcat(sdptemp, buffer, 2048);
+					janus_strlcat(sdptemp, buffer, 2048);
 				}
 				if(mp->codecs.audio_fmtp) {
 					g_snprintf(buffer, 512,
 						"a=fmtp:%d %s\r\n",
 						pt, mp->codecs.audio_fmtp);
-					g_strlcat(sdptemp, buffer, 2048);
+					janus_strlcat(sdptemp, buffer, 2048);
 				}
-				g_strlcat(sdptemp, "a=sendonly\r\n", 2048);
+				janus_strlcat(sdptemp, "a=sendonly\r\n", 2048);
 				g_snprintf(buffer, 512, "a=extmap:%d %s\r\n", 1, JANUS_RTP_EXTMAP_MID);
-				g_strlcat(sdptemp, buffer, 2048);
+				janus_strlcat(sdptemp, buffer, 2048);
 			}
 			if(mp->codecs.video_pt > 0 && session->video) {
 				int pt = session->video_pt > 0 ? session->video_pt : mp->codecs.video_pt;
@@ -4932,31 +4932,33 @@ done:
 				g_snprintf(buffer, 512,
 					"m=video 1 RTP/SAVPF %d\r\n"
 					"c=IN IP4 1.1.1.1\r\n", pt);
-				g_strlcat(sdptemp, buffer, 2048);
+				janus_strlcat(sdptemp, buffer, 2048);
 				if(mp->codecs.video_rtpmap) {
 					g_snprintf(buffer, 512,
 						"a=rtpmap:%d %s\r\n",
 						pt, mp->codecs.video_rtpmap);
-					g_strlcat(sdptemp, buffer, 2048);
+					janus_strlcat(sdptemp, buffer, 2048);
 				}
 				if(mp->codecs.video_fmtp) {
 					g_snprintf(buffer, 512,
 						"a=fmtp:%d %s\r\n",
 						pt, mp->codecs.video_fmtp);
-					g_strlcat(sdptemp, buffer, 2048);
+					janus_strlcat(sdptemp, buffer, 2048);
 				}
 				g_snprintf(buffer, 512,
 					"a=rtcp-fb:%d nack\r\n", pt);
-				g_strlcat(sdptemp, buffer, 2048);
+				janus_strlcat(sdptemp, buffer, 2048);
 				g_snprintf(buffer, 512,
 					"a=rtcp-fb:%d nack pli\r\n", pt);
-				g_strlcat(sdptemp, buffer, 2048);
+				janus_strlcat(sdptemp, buffer, 2048);
 				g_snprintf(buffer, 512,
 					"a=rtcp-fb:%d goog-remb\r\n", pt);
-				g_strlcat(sdptemp, buffer, 2048);
-				g_strlcat(sdptemp, "a=sendonly\r\n", 2048);
+				janus_strlcat(sdptemp, buffer, 2048);
+				janus_strlcat(sdptemp, "a=sendonly\r\n", 2048);
 				g_snprintf(buffer, 512, "a=extmap:%d %s\r\n", 1, JANUS_RTP_EXTMAP_MID);
-				g_strlcat(sdptemp, buffer, 2048);
+				janus_strlcat(sdptemp, buffer, 2048);
+				g_snprintf(buffer, 512, "a=extmap:%d %s\r\n", 2, JANUS_RTP_EXTMAP_ABS_SEND_TIME);
+				janus_strlcat(sdptemp, buffer, 2048);
 			}
 #ifdef HAVE_SCTP
 			if(mp->data && session->data) {
@@ -4965,7 +4967,7 @@ done:
 					"m=application 1 UDP/DTLS/SCTP webrtc-datachannel\r\n"
 					"c=IN IP4 1.1.1.1\r\n"
 					"a=sctp-port:5000\r\n");
-				g_strlcat(sdptemp, buffer, 2048);
+				janus_strlcat(sdptemp, buffer, 2048);
 			}
 #endif
 			sdp = g_strdup(sdptemp);
@@ -6644,7 +6646,7 @@ static int janus_streaming_rtsp_connect_to_server(janus_streaming_mountpoint *mp
 								} else if(is_session) {
 									if(!strcasecmp(name, "timeout")) {
 										/* Take note of the timeout, for keep-alives */
-										source->ka_timeout = janus_streaming_min_if(source->session_timeout, atoi(value) / 2 * G_USEC_PER_SEC);
+										source->ka_timeout = janus_streaming_min_if(source->session_timeout, (gint64)atoi(value) / 2 * G_USEC_PER_SEC);
 										JANUS_LOG(LOG_VERB, "  -- RTSP session timeout (video): %"SCNi64" ms\n", source->ka_timeout / 1000);
 									}
 								}
@@ -6817,7 +6819,7 @@ static int janus_streaming_rtsp_connect_to_server(janus_streaming_mountpoint *mp
 								} else if(is_session) {
 									if(!strcasecmp(name, "timeout")) {
 										/* Take note of the timeout, for keep-alives */
-										source->ka_timeout = janus_streaming_min_if(source->session_timeout, atoi(value) / 2 * G_USEC_PER_SEC);
+										source->ka_timeout = janus_streaming_min_if(source->session_timeout, (gint64)atoi(value) / 2 * G_USEC_PER_SEC);
 										JANUS_LOG(LOG_VERB, "  -- RTSP session timeout (audio): %"SCNi64" ms\n", source->ka_timeout / 1000);
 									}
 								}
@@ -7056,7 +7058,7 @@ janus_streaming_mountpoint *janus_streaming_create_rtsp_source(
 		JANUS_LOG(LOG_VERB, "Missing name, will generate a random one...\n");
 		memset(tempname, 0, 255);
 		g_snprintf(tempname, 255, "%s", id_str);
-	} else if(atoi(name) != 0) {
+	} else if(name[0] == '0' || atoi(name) != 0) {
 		JANUS_LOG(LOG_VERB, "Names can't start with a number, prefixing it...\n");
 		memset(tempname, 0, 255);
 		g_snprintf(tempname, 255, "mp-%s", name);

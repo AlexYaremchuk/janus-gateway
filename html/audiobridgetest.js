@@ -57,9 +57,13 @@ var spinner = null;
 var myroom = 1234;	// Demo room
 if(getQueryStringValue("room") !== "")
 	myroom = parseInt(getQueryStringValue("room"));
+var acodec = (getQueryStringValue("acodec") !== "" ? getQueryStringValue("acodec") : null);
 var stereo = false;
 if(getQueryStringValue("stereo") !== "")
 	stereo = (getQueryStringValue("stereo") === "true");
+var mygroup = null;	// Forwarding group, if required by the room
+if(getQueryStringValue("group") !== "")
+	mygroup = getQueryStringValue("group");
 var myusername = null;
 var myid = null;
 var webrtcUp = false;
@@ -174,7 +178,7 @@ $(document).ready(function() {
 												Janus.debug("Got a list of participants:", list);
 												for(var f in list) {
 													var id = list[f]["id"];
-													var display = list[f]["display"];
+													var display = escapeXmlTags(list[f]["display"]);
 													var setup = list[f]["setup"];
 													var muted = list[f]["muted"];
 													var spatial = list[f]["spatial_position"];
@@ -218,7 +222,7 @@ $(document).ready(function() {
 												Janus.debug("Got a list of participants:", list);
 												for(var f in list) {
 													var id = list[f]["id"];
-													var display = list[f]["display"];
+													var display = escapeXmlTags(list[f]["display"]);
 													var setup = list[f]["setup"];
 													var muted = list[f]["muted"];
 													var spatial = list[f]["spatial_position"];
@@ -263,7 +267,7 @@ $(document).ready(function() {
 												Janus.debug("Got a list of participants:", list);
 												for(var f in list) {
 													var id = list[f]["id"];
-													var display = list[f]["display"];
+													var display = escapeXmlTags(list[f]["display"]);
 													var setup = list[f]["setup"];
 													var muted = list[f]["muted"];
 													var spatial = list[f]["spatial_position"];
@@ -425,8 +429,15 @@ function registerUsername() {
 			return;
 		}
 		var register = { request: "join", room: myroom, display: username };
-		myusername = username;
-		mixertest.send({ message: register});
+		myusername = escapeXmlTags(username);
+		// Check if we need to join using G.711 instead of (default) Opus
+		if(acodec === 'opus' || acodec === 'pcmu' || acodec === 'pcma')
+			register.codec = acodec;
+		// If the room uses forwarding groups, this is how we state ours
+		if(mygroup)
+			register["group"] = mygroup;
+		// Send the message
+		mixertest.send({ message: register });
 	}
 }
 
@@ -436,4 +447,13 @@ function getQueryStringValue(name) {
 	var regex = new RegExp("[\\?&]" + name + "=([^&#]*)"),
 		results = regex.exec(location.search);
 	return results === null ? "" : decodeURIComponent(results[1].replace(/\+/g, " "));
+}
+
+// Helper to escape XML tags
+function escapeXmlTags(value) {
+	if(value) {
+		var escapedValue = value.replace(new RegExp('<', 'g'), '&lt');
+		escapedValue = escapedValue.replace(new RegExp('>', 'g'), '&gt');
+		return escapedValue;
+	}
 }

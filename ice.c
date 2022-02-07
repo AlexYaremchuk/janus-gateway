@@ -70,6 +70,14 @@ char *janus_ice_get_turn_rest_api(void) {
 #endif
 }
 
+/* Force relay settings */
+static gboolean force_relay_allowed = FALSE;
+void janus_ice_allow_force_relay(void) {
+	force_relay_allowed = TRUE;
+}
+gboolean janus_ice_is_force_relay_allowed(void) {
+	return force_relay_allowed;
+}
 
 /* ICE-Lite status */
 static gboolean janus_ice_lite_enabled;
@@ -160,6 +168,7 @@ typedef struct janus_ice_static_event_loop {
 	GThread *thread;
 } janus_ice_static_event_loop;
 static int static_event_loops = 0;
+static gboolean allow_loop_indication = FALSE;
 static GSList *event_loops = NULL, *current_loop = NULL;
 static janus_mutex event_loops_mutex = JANUS_MUTEX_INITIALIZER;
 static void *janus_ice_static_event_loop_thread(void *data) {
@@ -181,7 +190,10 @@ static void *janus_ice_static_event_loop_thread(void *data) {
 int janus_ice_get_static_event_loops(void) {
 	return static_event_loops;
 }
-void janus_ice_set_static_event_loops(int loops) {
+gboolean janus_ice_is_loop_indication_allowed(void) {
+	return allow_loop_indication;
+}
+void janus_ice_set_static_event_loops(int loops, gboolean allow_api) {
 	if(loops == 0)
 		return;
 	else if(loops < 1) {
@@ -214,6 +226,9 @@ void janus_ice_set_static_event_loops(int loops) {
 	}
 	current_loop = event_loops;
 	JANUS_LOG(LOG_INFO, "Spawned %d static event loops (handles won't have a dedicated loop)\n", static_event_loops);
+	allow_loop_indication = allow_api;
+	JANUS_LOG(LOG_INFO, "  -- Janus API %s be able to drive the loop choice for new handles\n",
+		allow_loop_indication ? "will" : "will NOT");
 	return;
 }
 void janus_ice_stop_static_event_loops(void) {
@@ -335,10 +350,18 @@ int janus_ice_get_event_stats_period(void) {
 	return janus_ice_event_stats_period;
 }
 
+/* How to handle media statistic events (one per media or one per peerConnection) */
+static gboolean janus_ice_event_combine_media_stats = false;
+void janus_ice_event_set_combine_media_stats(gboolean combine_media_stats_to_one_event) {
+	janus_ice_event_combine_media_stats = combine_media_stats_to_one_event;
+}
+gboolean janus_ice_event_get_combine_media_stats(void) {
+	return janus_ice_event_combine_media_stats;
+}
 
 /* RTP/RTCP port range */
-uint16_t rtp_range_min = 0;
-uint16_t rtp_range_max = 0;
+static uint16_t rtp_range_min = 0;
+static uint16_t rtp_range_max = 0;
 
 
 #define JANUS_ICE_PACKET_AUDIO	0
@@ -364,6 +387,7 @@ static janus_ice_queued_packet
 	janus_ice_start_gathering,
 	janus_ice_add_candidates,
 	janus_ice_dtls_handshake,
+	janus_ice_media_stopped,
 	janus_ice_hangup_peerconnection,
 	janus_ice_detach_handle,
 	janus_ice_data_ready;
@@ -466,8 +490,11 @@ uint janus_get_no_media_timer(void) {
 }
 
 /* Number of lost packets per seconds on a media stream (uplink or downlink,
- * audio or video), that should result in a slow-link event to the iser */
-#define DEFAULT_SLOWLINK_THRESHOLD	4
+ * audio or video), that should result in a slow-link event to the user.
+ * By default the feature is disabled (threshold=0), as it can be quite
+ * verbose and is often redundant information, since the same info on lost
+ * packets (in and out) can already be retrieved via client-side stats */
+#define DEFAULT_SLOWLINK_THRESHOLD	0
 static uint slowlink_threshold = DEFAULT_SLOWLINK_THRESHOLD;
 void janus_set_slowlink_threshold(uint packets) {
 	slowlink_threshold = packets;
@@ -522,6 +549,7 @@ static void janus_ice_free_queued_packet(janus_ice_queued_packet *pkt) {
 	if(pkt == NULL || pkt == &janus_ice_start_gathering ||
 			pkt == &janus_ice_add_candidates ||
 			pkt == &janus_ice_dtls_handshake ||
+			pkt == &janus_ice_media_stopped ||
 			pkt == &janus_ice_hangup_peerconnection ||
 			pkt == &janus_ice_detach_handle ||
 			pkt == &janus_ice_data_ready) {
@@ -1261,7 +1289,7 @@ janus_ice_handle *janus_ice_handle_create(void *core_session, const char *opaque
 	return handle;
 }
 
-gint janus_ice_handle_attach_plugin(void *core_session, janus_ice_handle *handle, janus_plugin *plugin) {
+gint janus_ice_handle_attach_plugin(void *core_session, janus_ice_handle *handle, janus_plugin *plugin, int loop_index) {
 	if(core_session == NULL)
 		return JANUS_ERROR_SESSION_NOT_FOUND;
 	janus_session *session = (janus_session *)core_session;
@@ -1300,14 +1328,34 @@ gint janus_ice_handle_attach_plugin(void *core_session, janus_ice_handle *handle
 		handle->mainloop = g_main_loop_new(handle->mainctx, FALSE);
 	} else {
 		/* We're actually using static event loops, pick one from the list */
+		if(!allow_loop_indication && loop_index > -1) {
+			JANUS_LOG(LOG_WARN, "[%"SCNu64"] Manual allocation of event loops forbidden, ignoring provided loop index %d\n", handle->handle_id, loop_index);
+		}
 		janus_refcount_increase(&handle->ref);
 		janus_mutex_lock(&event_loops_mutex);
-		janus_ice_static_event_loop *loop = (janus_ice_static_event_loop *)current_loop->data;
-		handle->mainctx = loop->mainctx;
-		handle->mainloop = loop->mainloop;
-		current_loop = current_loop->next;
-		if(current_loop == NULL)
-			current_loop = event_loops;
+		gboolean automatic_selection = TRUE;
+		if(allow_loop_indication && loop_index != -1) {
+			/* The API can drive the selection and an index was provided, check if it exists */
+			janus_ice_static_event_loop *loop = g_slist_nth_data(event_loops, loop_index);
+			if(loop == NULL) {
+				JANUS_LOG(LOG_WARN, "[%"SCNu64"] Invalid loop index %d, picking event loop automatically\n", handle->handle_id, loop_index);
+			} else {
+				automatic_selection = FALSE;
+				handle->mainctx = loop->mainctx;
+				handle->mainloop = loop->mainloop;
+				JANUS_LOG(LOG_VERB, "[%"SCNu64"] Manually added handle to loop #%d\n", handle->handle_id, loop->id);
+			}
+		}
+		if(automatic_selection) {
+			/* Pick an available loop automatically (round robin) */
+			janus_ice_static_event_loop *loop = (janus_ice_static_event_loop *)current_loop->data;
+			handle->mainctx = loop->mainctx;
+			handle->mainloop = loop->mainloop;
+			current_loop = current_loop->next;
+			if(current_loop == NULL)
+				current_loop = event_loops;
+			JANUS_LOG(LOG_VERB, "[%"SCNu64"] Automatically added handle to loop #%d\n", handle->handle_id, loop->id);
+		}
 		janus_mutex_unlock(&event_loops_mutex);
 	}
 	handle->rtp_source = janus_ice_outgoing_traffic_create(handle, (GDestroyNotify)g_free);
@@ -1370,7 +1418,10 @@ gint janus_ice_handle_destroy(void *core_session, janus_ice_handle *handle) {
 		janus_refcount_decrease(&handle->ref);
 		return 0;
 	}
-	JANUS_LOG(LOG_INFO, "Detaching handle from %s; %p %p %p %p\n", plugin_t->get_name(), handle, handle->app_handle, handle->app_handle->gateway_handle, handle->app_handle->plugin_handle);
+	JANUS_LOG(LOG_INFO, "Detaching handle from %s; %p %p %p %p\n", plugin_t->get_name(),
+		handle, handle ? handle->app_handle : NULL,
+		(handle && handle->app_handle) ? handle->app_handle->gateway_handle : NULL,
+		(handle && handle->app_handle) ? handle->app_handle->plugin_handle : NULL);
 	/* Actually detach handle... */
 	if(g_atomic_int_compare_and_exchange(&handle->app_handle->stopped, 0, 1)) {
 		/* Notify the plugin that the session's over (the plugin will
@@ -3038,6 +3089,10 @@ static void janus_ice_cb_nice_recv(NiceAgent *agent, guint stream_id, guint comp
 					stream->nack_queue_ms = mavg;
 				}
 				JANUS_LOG(LOG_HUGE, "[%"SCNu64"] Got %s RTCP (%d bytes)\n", handle->handle_id, video ? "video" : "audio", buflen);
+				/* See if there's any REMB bitrate to track */
+				uint32_t bitrate = janus_rtcp_get_remb(buf, buflen);
+				if(bitrate > 0)
+					stream->remb_bitrate = bitrate;
 
 				/* Now let's see if there are any NACKs to handle */
 				gint64 now = janus_get_monotonic_time();
@@ -3100,6 +3155,8 @@ static void janus_ice_cb_nice_recv(NiceAgent *agent, guint stream_id, guint comp
 								g_async_queue_push(handle->queued_packets, pkt);
 #endif
 								g_main_context_wakeup(handle->mainctx);
+							} else {
+								janus_ice_free_queued_packet(pkt);
 							}
 						}
 						if(rtcp_ctx != NULL && in_rb) {
@@ -3166,7 +3223,7 @@ static void janus_ice_cb_nice_recv(NiceAgent *agent, guint stream_id, guint comp
 void janus_ice_incoming_data(janus_ice_handle *handle, char *label, char *protocol, gboolean textdata, char *buffer, int length) {
 	if(handle == NULL || buffer == NULL || length <= 0)
 		return;
-	janus_plugin_data data = { .label = label, .binary = !textdata, .buffer = buffer, .length = length };
+	janus_plugin_data data = { .label = label, .protocol = protocol, .binary = !textdata, .buffer = buffer, .length = length };
 	janus_plugin *plugin = (janus_plugin *)handle->app;
 	if(plugin && plugin->incoming_data && handle->app_handle &&
 			!g_atomic_int_get(&handle->app_handle->stopped) &&
@@ -3462,7 +3519,7 @@ void janus_ice_setup_remote_candidates(janus_ice_handle *handle, guint stream_id
 }
 
 int janus_ice_setup_local(janus_ice_handle *handle, int offer, int audio, int video, int data, int trickle) {
-	if(!handle)
+	if(!handle || g_atomic_int_get(&handle->destroyed))
 		return -1;
 	if(janus_flags_is_set(&handle->webrtc_flags, JANUS_ICE_HANDLE_WEBRTC_HAS_AGENT)) {
 		JANUS_LOG(LOG_WARN, "[%"SCNu64"] Agent already exists?\n", handle->handle_id);
@@ -3626,14 +3683,13 @@ int janus_ice_setup_local(janus_ice_handle *handle, int offer, int audio, int vi
 			/* Skip 0.0.0.0, :: and, unless otherwise configured, local scoped addresses  */
 			if(!strcmp(host, "0.0.0.0") || !strcmp(host, "::") || (!janus_ipv6_linklocal_enabled && !strncmp(host, "fe80:", 5)))
 				continue;
-			/* Check if this IP address is in the ignore/enforce list, now: the enforce list has the precedence */
+			/* Check if this IP address is in the ignore/enforce list: the enforce list has the precedence but the ignore list can then discard candidates */
 			if(janus_ice_enforce_list != NULL) {
 				if(ifa->ifa_name != NULL && !janus_ice_is_enforced(ifa->ifa_name) && !janus_ice_is_enforced(host))
 					continue;
-			} else {
-				if(janus_ice_is_ignored(host))
-					continue;
 			}
+			if(janus_ice_is_ignored(host))
+				continue;
 			/* Ok, add interface to the ICE agent */
 			JANUS_LOG(LOG_VERB, "[%"SCNu64"] Adding %s to the addresses to gather candidates for\n", handle->handle_id, host);
 			NiceAddress addr_local;
@@ -3748,6 +3804,12 @@ int janus_ice_setup_local(janus_ice_handle *handle, int offer, int audio, int vi
 #endif
 	/* Gather now only if we're doing hanf-trickle */
 	if(!janus_full_trickle_enabled && !nice_agent_gather_candidates(handle->agent, handle->stream_id)) {
+#ifdef HAVE_TURNRESTAPI
+		if(turnrest_credentials != NULL) {
+			janus_turnrest_response_destroy(turnrest_credentials);
+			turnrest_credentials = NULL;
+		}
+#endif
 		JANUS_LOG(LOG_ERR, "[%"SCNu64"] Error gathering candidates...\n", handle->handle_id);
 		janus_flags_clear(&handle->webrtc_flags, JANUS_ICE_HANDLE_WEBRTC_HAS_AGENT);
 		janus_ice_webrtc_hangup(handle, "Gathering error");
@@ -4131,6 +4193,10 @@ static gboolean janus_ice_outgoing_stats_handle(gpointer user_data) {
 	handle->last_event_stats++;
 	if(janus_ice_event_stats_period > 0 && handle->last_event_stats >= janus_ice_event_stats_period) {
 		handle->last_event_stats = 0;
+		json_t *combined_event = NULL;
+		/* Shall janus send dedicated events per media or one per peerConnection */
+		if(janus_events_is_enabled() && janus_ice_event_get_combine_media_stats())
+			combined_event = json_array();
 		/* Audio */
 		if(janus_events_is_enabled() && janus_flags_is_set(&handle->webrtc_flags, JANUS_ICE_HANDLE_WEBRTC_HAS_AUDIO)) {
 			if(stream && stream->audio_rtcp_ctx) {
@@ -4157,8 +4223,12 @@ static gboolean janus_ice_outgoing_stats_handle(gpointer user_data) {
 					json_object_set_new(info, "nacks-sent", json_integer(stream->component->out_stats.audio.nacks));
 					json_object_set_new(info, "retransmissions-received", json_integer(stream->audio_rtcp_ctx->retransmitted));
 				}
-				janus_events_notify_handlers(JANUS_EVENT_TYPE_MEDIA, JANUS_EVENT_SUBTYPE_MEDIA_STATS,
-					session->session_id, handle->handle_id, handle->opaque_id, info);
+				if(combined_event != NULL) {
+					json_array_append_new(combined_event, info);
+				} else {
+					janus_events_notify_handlers(JANUS_EVENT_TYPE_MEDIA, JANUS_EVENT_SUBTYPE_MEDIA_STATS,
+						session->session_id, handle->handle_id, handle->opaque_id, info);
+				}
 			}
 		}
 		/* Do the same for video */
@@ -4184,6 +4254,8 @@ static gboolean janus_ice_outgoing_stats_handle(gpointer user_data) {
 					json_object_set_new(info, "in-media-link-quality", json_integer(janus_rtcp_context_get_in_media_link_quality(stream->video_rtcp_ctx[vindex])));
 					json_object_set_new(info, "out-link-quality", json_integer(janus_rtcp_context_get_out_link_quality(stream->video_rtcp_ctx[vindex])));
 					json_object_set_new(info, "out-media-link-quality", json_integer(janus_rtcp_context_get_out_media_link_quality(stream->video_rtcp_ctx[vindex])));
+					if(vindex == 0 && stream->remb_bitrate > 0)
+						json_object_set_new(info, "remb-bitrate", json_integer(stream->remb_bitrate));
 					if(stream->component) {
 						json_object_set_new(info, "packets-received", json_integer(stream->component->in_stats.video[vindex].packets));
 						json_object_set_new(info, "packets-sent", json_integer(stream->component->out_stats.video[vindex].packets));
@@ -4195,9 +4267,17 @@ static gboolean janus_ice_outgoing_stats_handle(gpointer user_data) {
 						json_object_set_new(info, "nacks-sent", json_integer(stream->component->out_stats.video[vindex].nacks));
 						json_object_set_new(info, "retransmissions-received", json_integer(stream->video_rtcp_ctx[vindex]->retransmitted));
 					}
-					janus_events_notify_handlers(JANUS_EVENT_TYPE_MEDIA, JANUS_EVENT_SUBTYPE_MEDIA_STATS,
-						session->session_id, handle->handle_id, handle->opaque_id, info);
+					if(combined_event) {
+						json_array_append_new(combined_event, info);
+					} else {
+						janus_events_notify_handlers(JANUS_EVENT_TYPE_MEDIA, JANUS_EVENT_SUBTYPE_MEDIA_STATS,
+							session->session_id, handle->handle_id, handle->opaque_id, info);
+					}
 				}
+			}
+			if(combined_event) {
+				janus_events_notify_handlers(JANUS_EVENT_TYPE_MEDIA, JANUS_EVENT_SUBTYPE_MEDIA_STATS,
+					session->session_id, handle->handle_id, handle->opaque_id, combined_event);
 			}
 		}
 	}
@@ -4267,6 +4347,22 @@ static gboolean janus_ice_outgoing_traffic_handle(janus_ice_handle *handle, janu
 		g_source_set_callback(component->dtlsrt_source, janus_dtls_retry, component->dtls, NULL);
 		guint id = g_source_attach(component->dtlsrt_source, handle->mainctx);
 		JANUS_LOG(LOG_VERB, "[%"SCNu64"] Creating retransmission timer with ID %u\n", handle->handle_id, id);
+		return G_SOURCE_CONTINUE;
+	} else if(pkt == &janus_ice_media_stopped) {
+		/* Either audio or video has been disabled on the way in, so use the callback to notify the peer */
+		if(component && stream && !component->in_stats.audio.notified_lastsec && component->in_stats.audio.bytes && !stream->audio_send) {
+			/* Audio won't be received for a while, notify */
+			component->in_stats.audio.notified_lastsec = TRUE;
+			janus_ice_notify_media(handle, FALSE, 0, FALSE);
+		}
+		int vindex=0;
+		for(vindex=0; vindex<3; vindex++) {
+			if(component && stream && !component->in_stats.video[vindex].notified_lastsec && component->in_stats.video[vindex].bytes && !stream->video_recv) {
+				/* Video won't be received for a while, notify */
+				component->in_stats.video[vindex].notified_lastsec = TRUE;
+				janus_ice_notify_media(handle, TRUE, vindex, FALSE);
+			}
+		}
 		return G_SOURCE_CONTINUE;
 	} else if(pkt == &janus_ice_hangup_peerconnection) {
 		/* The media session is over, send an alert on all streams and components */
@@ -4475,6 +4571,15 @@ static gboolean janus_ice_outgoing_traffic_handle(janus_ice_handle *handle, janu
 				if(!pkt->retransmission) {
 					/* ... but only if this isn't a retransmission (for those we already set it before) */
 					header->ssrc = htonl(video ? stream->video_ssrc : stream->audio_ssrc);
+				}
+				/* Set the abs-send-time value, if needed */
+				if(video && stream->abs_send_time_ext_id > 0) {
+					int64_t now = (((janus_get_monotonic_time()/1000) << 18) + 500) / 1000;
+					uint32_t abs_ts = (uint32_t)now & 0x00FFFFFF;
+					if(janus_rtp_header_extension_set_abs_send_time(pkt->data, pkt->length,
+							stream->abs_send_time_ext_id, abs_ts) < 0) {
+						JANUS_LOG(LOG_ERR, "[%"SCNu64"] Error setting abs-send-time value...\n", handle->handle_id);
+					}
 				}
 				/* Set the transport-wide sequence number, if needed */
 				if(video && stream->transport_wide_cc_ext_id > 0) {
@@ -4766,7 +4871,8 @@ void janus_ice_relay_rtp(janus_ice_handle *handle, janus_plugin_rtp *packet) {
 	int origext = header->extension;
 	header->extension = 0;
 	/* Add core and plugin extensions, if any */
-	if((packet->video && handle->stream->transport_wide_cc_ext_id > 0) || handle->stream->mid_ext_id > 0 ||
+	if(handle->stream->mid_ext_id > 0 || (packet->video && handle->stream->abs_send_time_ext_id > 0) ||
+			(packet->video && handle->stream->transport_wide_cc_ext_id > 0) ||
 			(!packet->video && packet->extensions.audio_level != -1 && handle->stream->audiolevel_ext_id > 0) ||
 			(packet->video && packet->extensions.video_rotation != -1 && handle->stream->videoorientation_ext_id > 0)) {
 		header->extension = 1;
@@ -4776,6 +4882,14 @@ void janus_ice_relay_rtp(janus_ice_handle *handle, janus_plugin_rtp *packet) {
 		extheader->length = 0;
 		/* Iterate on all extensions we need */
 		char *index = extensions + 4;
+		/* Check if we need to add the abs-send-time extension */
+		if(packet->video && handle->stream->abs_send_time_ext_id > 0) {
+			*index = (handle->stream->abs_send_time_ext_id << 4) + 2;
+			/* We'll actually set the value later, when sending the packet */
+			memset(index+1, 0, 3);
+			index += 4;
+			extlen += 4;
+		}
 		/* Check if we need to add the transport-wide CC extension */
 		if(packet->video && handle->stream->transport_wide_cc_ext_id > 0) {
 			*index = (handle->stream->transport_wide_cc_ext_id << 4) + 1;
@@ -4879,8 +4993,10 @@ void janus_ice_relay_rtcp_internal(janus_ice_handle *handle, janus_plugin_rtcp *
 		if(stream == NULL)
 			return;
 		rtcp_buf = janus_rtcp_filter(packet->buffer, packet->length, &rtcp_len);
-		if(rtcp_buf == NULL || rtcp_len < 1)
+		if(rtcp_buf == NULL || rtcp_len < 1) {
+			g_free(rtcp_buf);
 			return;
+		}
 		/* Fix all SSRCs before enqueueing, as we need to use the ones for this media
 		 * leg. Note that this is only needed for RTCP packets coming from plugins: the
 		 * ones created by the core already have the right SSRCs in the right place */
@@ -5005,6 +5121,18 @@ void janus_ice_notify_data_ready(janus_ice_handle *handle) {
 #endif
 	g_main_context_wakeup(handle->mainctx);
 #endif
+}
+
+void janus_ice_notify_media_stopped(janus_ice_handle *handle) {
+	if(!handle || handle->queued_packets == NULL)
+		return;
+	/* Queue this event */
+#if GLIB_CHECK_VERSION(2, 46, 0)
+	g_async_queue_push_front(handle->queued_packets, &janus_ice_media_stopped);
+#else
+	g_async_queue_push(handle->queued_packets, &janus_ice_media_stopped);
+#endif
+	g_main_context_wakeup(handle->mainctx);
 }
 
 void janus_ice_dtls_handshake_done(janus_ice_handle *handle, janus_ice_component *component) {

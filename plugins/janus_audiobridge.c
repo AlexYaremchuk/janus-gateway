@@ -39,10 +39,14 @@ room-<unique room ID>: {
 	audio_active_packets = 100 (number of packets with audio level, default=100, 2 seconds)
 	audio_level_average = 25 (average value of audio level, 127=muted, 0='too loud', default=25)
 	default_prebuffering = number of packets to buffer before decoding each participant (default=DEFAULT_PREBUFFERING)
+	default_expectedloss = percent of packets we expect participants may miss, to help with FEC (default=0, max=20; automatically used for forwarders too)
+	default_bitrate = default bitrate in bps to use for the all participants (default=auto, libopus decides; automatically used for forwarders too)
 	record = true|false (whether this room should be recorded, default=false)
 	record_file = /path/to/recording.wav (where to save the recording)
+	record_dir = /path/to/ (path to save the recording to, makes record_file a relative path if provided)
 	allow_rtp_participants = true|false (whether participants should be allowed to join
 		via plain RTP as well, rather than just WebRTC, default=false)
+	groups = optional, non-hierarchical, array of groups to tag participants, for external forwarding purposes only
 
 		[The following lines are only needed if you want the mixed audio
 		to be automatically forwarded via plain RTP to an external component
@@ -55,6 +59,7 @@ room-<unique room ID>: {
 	rtp_forward_ssrc = SSRC to use to use when streaming (optional: stream_id used if missing)
 	rtp_forward_codec = opus (default), pcma (A-Law) or pcmu (mu-Law)
 	rtp_forward_ptype = payload type to use when streaming (optional: only read for Opus, 100 used if missing)
+	rtp_forward_group = group of participants to forward, if enabled in the room (optional: forwards full mix if missing)
 	rtp_forward_srtp_suite = length of authentication tag, if SRTP is needed (32 or 80)
 	rtp_forward_srtp_crypto = key to use as crypto, if SRTP is needed (base64 encoded key as in SDES)
 	rtp_forward_always_on = true|false, whether silence should be forwarded when the room is empty (optional: false used if missing)
@@ -111,7 +116,9 @@ room-<unique room ID>: {
  * existing RTP forwarder; \c listforwarders lists all the current RTP
  * forwarders on a specific AudioBridge room instance. As an alternative,
  * you can configure a single static RTP forwarder in the plugin
- * configuration file.
+ * configuration file. A finer grained control of what to forward
+ * externally, in terms of participants mix, can be achieved using
+ * groups.
  *
  * \c create can be used to create a new audio room, and has to be
  * formatted as follows:
@@ -133,9 +140,13 @@ room-<unique room ID>: {
 	"audio_active_packets" : <number of packets with audio level (default=100, 2 seconds)>,
 	"audio_level_average" : <average value of audio level (127=muted, 0='too loud', default=25)>,
 	"default_prebuffering" : <number of packets to buffer before decoding each participant (default=DEFAULT_PREBUFFERING)>,
+	"default_expectedloss" : <percent of packets we expect participants may miss, to help with FEC (default=0, max=20; automatically used for forwarders too)>,
+	"default_bitrate" : <bitrate in bps to use for the all participants (default=auto, libopus decides; automatically used for forwarders too)>,
 	"record" : <true|false, whether to record the room or not, default=false>,
 	"record_file" : "</path/to/the/recording.wav, optional>",
-	"allow_rtp_participants" : <true|false, whether participants should be allowed to join via plain RTP as well, default=false>
+	"record_dir" : "</path/to/, optional; makes record_file a relative path, if provided>",
+	"allow_rtp_participants" : <true|false, whether participants should be allowed to join via plain RTP as well, default=false>,
+	"groups" : [ non-hierarchical array of string group names to use to gat participants, for external forwarding purposes only, optional]
 }
 \endverbatim
  *
@@ -189,6 +200,7 @@ room-<unique room ID>: {
 	"new_secret" : "<new password required to edit/destroy the room, optional>",
 	"new_pin" : "<new password required to join the room, optional>",
 	"new_is_private" : <true|false, whether the room should appear in a list request>,
+	"new_record_dir" : "<new path where new recording files should be saved>",
 	"permanent" : <true|false, whether the room should be also removed from the config file, default=false>
 }
 \endverbatim
@@ -244,7 +256,8 @@ room-<unique room ID>: {
 	"room" : <unique numeric ID of the room>,
 	"secret" : "<room secret; mandatory if configured>"
 	"record" : <true|false, whether this room should be automatically recorded or not>,
-	"record_file" : "<file where audio recording is saved (optional)>"
+	"record_file" : "<file where audio recording should be saved (optional)>",
+	"record_dir" : "<path where audio recording file should be saved (optional)>"
 }
 \endverbatim
  *
@@ -406,6 +419,7 @@ room-<unique room ID>: {
 {
 	"request" : "rtp_forward",
 	"room" : <unique numeric ID of the room to add the forwarder to>,
+	"group" : "<group to forward, if enabled in the room (forwards full mix if missing)>",
 	"ssrc" : <SSRC to use to use when streaming (optional: stream_id used if missing)>,
 	"codec" : "<opus (default), pcma (A-Law) or pcmu (mu-Law)>",
 	"ptype" : <payload type to use when streaming (optional: 100 used if missing)>,
@@ -418,6 +432,20 @@ room-<unique room ID>: {
 }
 \endverbatim
  *
+ * The concept of "groups" is particularly important, here, in case groups were
+ * enabled when creating a room. By default, in fact, if a room has groups disabled,
+ * then an RTP forwarder will simply relay the mix of all active participants;
+ * sometimes, though, an external application may want to only receive the mix
+ * of some of the participants, and not all of them. This is what groups are
+ * for: if you tag participants with a specific group name, then creating a
+ * new forwarder that explicitly references that group name will ensure that
+ * only a mix of the participants tagged with that name will be forwarded.
+ * As such, it's important to point out groups \b only impact forwarders,
+ * and \c NOT participants or how they're mixed in main mix for the room itself.
+ * Omitting a group name when creating a forwarder for a room where groups
+ * are enabled will simply fall back to the default behaviour of forwarding
+ * the full mix.
+ *
  * Notice that, as explained above, in case you configured an \c admin_key
  * property and extended it to RTP forwarding as well, you'll need to provide
  * it in the request as well or it will be rejected as unauthorized. By
@@ -429,6 +457,7 @@ room-<unique room ID>: {
 {
 	"audiobridge" : "success",
 	"room" : <unique numeric ID, same as request>,
+	"group" : "<group to forward, same as request if provided>",
 	"stream_id" : <unique numeric ID assigned to the new RTP forwarder>,
 	"host" : "<host this forwarder is streaming to, same as request if not resolved>",
 	"port" : <audio port this forwarder is streaming to, same as request>
@@ -477,6 +506,7 @@ room-<unique room ID>: {
 	"rtp_forwarders" : [		// Array of RTP forwarder objects
 		{	// RTP forwarder #1
 			"stream_id" : <unique numeric ID of the forwarder>,
+			"group" : "<group that is being forwarded, if available>",
 			"ip" : "<IP this forwarder is streaming to>",
 			"port" : <port this forwarder is streaming to>,
 			"ssrc" : <SSRC this forwarder is using, if any>,
@@ -504,6 +534,7 @@ room-<unique room ID>: {
 	"request" : "play_file",
 	"room" : <unique numeric ID of the room to play the file in>,
 	"secret" : "<room password, if configured>",
+	"group" : "<group to play in (for forwarding purposes only; optional, mandatory if enabled in the room)>",
 	"file_id": "<unique string ID of the announcement; random if not provided>",
 	"filename": "<path to the Opus file to play>",
 	"loop": <true|false, depending on whether or not the file should be played in a loop forever>
@@ -656,13 +687,16 @@ room-<unique room ID>: {
 	"request" : "join",
 	"room" : <numeric ID of the room to join>,
 	"id" : <unique ID to assign to the participant; optional, assigned by the plugin if missing>,
+	"group" : "<group to assign to this participant (for forwarding purposes only; optional, mandatory if enabled in the room)>",
 	"pin" : "<password required to join the room, if any; optional>",
 	"display" : "<display name to have in the room; optional>",
 	"token" : "<invitation token, in case the room has an ACL; optional>",
 	"muted" : <true|false, whether to start unmuted or muted>,
 	"codec" : "<codec to use, among opus (default), pcma (A-Law) or pcmu (mu-Law)>",
 	"prebuffer" : <number of packets to buffer before decoding this participant (default=room value, or DEFAULT_PREBUFFERING)>,
+	"bitrate" : <bitrate to use for the Opus stream in bps; optional, default=0 (libopus decides)>,
 	"quality" : <0-10, Opus-related complexity to use, the higher the value, the better the quality (but more CPU); optional, default is 4>,
+	"expected_loss" : <0-20, a percentage of the expected loss (capped at 20%), only needed in case FEC is used; optional, default is 0 (FEC disabled even when negotiated) or the room default>,
 	"volume" : <percent value, <100 reduces volume, >100 increases volume; optional, default is 100 (no volume change)>,
 	"spatial_position" : <in case spatial audio is enabled for the room, panning of this participant (0=left, 50=center, 100=right)>,
 	"secret" : "<room management password; optional, if provided the user is an admin and can't be globally muted with mute_room>",
@@ -692,7 +726,52 @@ room-<unique room ID>: {
  * include the \c room and the new participant as the only object in
  * a \c participants array.
  *
- * At this point, the media-related settings of the participant can be
+ * Notice that, while the AudioBridge assumes participants will exchange
+ * media via WebRTC, there's a less known feature that allows you to use
+ * plain RTP to join an AudioBridge room instead. This functionality may
+ * be helpful in case you want, e.g., SIP based endpoints to join an
+ * AudioBridge room, by crafting SDPs for the SIP dialogs yourself using
+ * the info exchanged with the plugin. In order to do that, you keep on
+ * using the API to join as a participant as explained above, but instead
+ * of negotiating a PeerConnection as you usually would, you add an \c rtp
+ * object to the \c join request, which needs to be formatted as follows:
+ *
+\verbatim
+{
+	"request" : "join",
+	[..]
+	"rtp" : {
+		"ip" : "<IP address you want media to be sent to>",
+		"port" : <port you want media to be sent to>,
+		"payload_type" : <payload type to use for RTP packets (optional; only needed in case Opus is used, automatic for G.711)>,
+		"audiolevel_ext" : <ID of the audiolevel RTP extension, if used (optional)>,
+		"fec" : <true|false, whether FEC should be enabled for the Opus stream (optional; only needed in case Opus is used)>
+	}
+}
+\endverbatim
+ *
+ * In that case, the participant will be configured to use plain RTP to
+ * exchange media with the room, and the \c joined event will include an
+ * \c rtp object as well to complete the negotiation:
+ *
+\verbatim
+{
+	"audiobridge" : "joined",
+	[..]
+	"rtp" : {
+		"ip" : "<IP address the AudioBridge will expect media to be sent to>",
+		"port" : <port the AudioBridge will expect media to be sent to>,
+		"payload_type" : <payload type to use for RTP packets (optional; only needed in case Opus is used, automatic for G.711)>
+	}
+}
+\endverbatim
+ *
+ * Notice that, after a plain RTP session has been established, the
+ * AudioBridge plugin will only start sending media via RTP after it
+ * has received at least a valid RTP packet from the remote endpoint.
+ *
+ * At this point, whether the participant will be interacting via WebRTC
+ * or plain RTP, the media-related settings of the participant can be
  * modified by means of a \c configure request. The \c configure request
  * has to be formatted as follows (notice that all parameters except
  * \c request are optional, depending on what you want to change):
@@ -703,11 +782,14 @@ room-<unique room ID>: {
 	"muted" : <true|false, whether to unmute or mute>,
 	"display" : "<new display name to have in the room>",
 	"prebuffer" : <new number of packets to buffer before decoding this participant (see "join" for more info)>,
+	"bitrate" : <new bitrate to use for the Opus stream (see "join" for more info)>,
 	"quality" : <new Opus-related complexity to use (see "join" for more info)>,
+	"expected_loss" : <new value for the expected loss (see "join" for more info)>
 	"volume" : <new volume percent value (see "join" for more info)>,
 	"spatial_position" : <in case spatial audio is enabled for the room, new panning of this participant (0=left, 50=center, 100=right)>,
 	"record": <true|false, whether to record this user's contribution to a .mjr file (mixer not involved),
-	"filename": "<basename of the file to record to, -audio.mjr will be added by the plugin>"
+	"filename": "<basename of the file to record to, -audio.mjr will be added by the plugin>",
+	"group" : "<new group to assign to this participant, if enabled in the room (for forwarding purposes)>"
 }
 \endverbatim
  *
@@ -798,10 +880,13 @@ room-<unique room ID>: {
 	"request" : "changeroom",
 	"room" : <numeric ID of the room to move to>,
 	"id" : <unique ID to assign to the participant; optional, assigned by the plugin if missing>,
+	"group" : "<group to assign to this participant (for forwarding purposes only; optional, mandatory if enabled in the new room)>",
 	"display" : "<display name to have in the room; optional>",
 	"token" : "<invitation token, in case the new room has an ACL; optional>",
 	"muted" : <true|false, whether to start unmuted or muted>,
-	"quality" : <0-10, Opus-related complexity to use, higher is higher quality; optional, default is 4>
+	"bitrate" : <bitrate to use for the Opus stream in bps; optional, default=0 (libopus decides)>,
+	"quality" : <0-10, Opus-related complexity to use, higher is higher quality; optional, default is 4>,
+	"expected_loss" : <0-20, a percentage of the expected loss (capped at 20%), only needed in case FEC is used; optional, default is 0 (FEC disabled even when negotiated) or the room default>
 }
 \endverbatim
  *
@@ -914,8 +999,8 @@ room-<unique room ID>: {
 
 
 /* Plugin information */
-#define JANUS_AUDIOBRIDGE_VERSION			11
-#define JANUS_AUDIOBRIDGE_VERSION_STRING	"0.0.11"
+#define JANUS_AUDIOBRIDGE_VERSION			12
+#define JANUS_AUDIOBRIDGE_VERSION_STRING	"0.0.12"
 #define JANUS_AUDIOBRIDGE_DESCRIPTION		"This is a plugin implementing an audio conference bridge for Janus, mixing Opus streams."
 #define JANUS_AUDIOBRIDGE_NAME				"JANUS AudioBridge plugin"
 #define JANUS_AUDIOBRIDGE_AUTHOR			"Meetecho s.r.l."
@@ -923,6 +1008,8 @@ room-<unique room ID>: {
 
 #define MIN_SEQUENTIAL 						2
 #define MAX_MISORDER						50
+
+#define JANUS_AUDIOBRIDGE_MAX_GROUPS		5
 
 /* Plugin methods */
 janus_plugin *create(void);
@@ -1007,6 +1094,9 @@ static struct janus_json_parameter idstr_parameters[] = {
 static struct janus_json_parameter idstropt_parameters[] = {
 	{"id", JSON_STRING, 0}
 };
+static struct janus_json_parameter group_parameters[] = {
+	{"group", JSON_STRING, JANUS_JSON_PARAM_REQUIRED}
+};
 static struct janus_json_parameter create_parameters[] = {
 	{"description", JSON_STRING, 0},
 	{"secret", JSON_STRING, 0},
@@ -1018,13 +1108,17 @@ static struct janus_json_parameter create_parameters[] = {
 	{"spatial_audio", JANUS_JSON_BOOL, 0},
 	{"record", JANUS_JSON_BOOL, 0},
 	{"record_file", JSON_STRING, 0},
+	{"record_dir", JSON_STRING, 0},
 	{"allow_rtp_participants", JANUS_JSON_BOOL, 0},
 	{"permanent", JANUS_JSON_BOOL, 0},
 	{"audiolevel_ext", JANUS_JSON_BOOL, 0},
 	{"audiolevel_event", JANUS_JSON_BOOL, 0},
 	{"audio_active_packets", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
 	{"audio_level_average", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
-	{"default_prebuffering", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE}
+	{"default_prebuffering", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
+	{"default_expectedloss", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
+	{"default_bitrate", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
+	{"groups", JSON_ARRAY, 0}
 };
 static struct janus_json_parameter edit_parameters[] = {
 	{"secret", JSON_STRING, 0},
@@ -1032,6 +1126,7 @@ static struct janus_json_parameter edit_parameters[] = {
 	{"new_secret", JSON_STRING, 0},
 	{"new_pin", JSON_STRING, 0},
 	{"new_is_private", JANUS_JSON_BOOL, 0},
+	{"new_record_dir", JSON_STRING, 0},
 	{"permanent", JANUS_JSON_BOOL, 0}
 };
 static struct janus_json_parameter destroy_parameters[] = {
@@ -1048,10 +1143,13 @@ static struct janus_json_parameter secret_parameters[] = {
 static struct janus_json_parameter join_parameters[] = {
 	{"display", JSON_STRING, 0},
 	{"token", JSON_STRING, 0},
+	{"group", JSON_STRING, 0},
 	{"muted", JANUS_JSON_BOOL, 0},
 	{"codec", JSON_STRING, 0},
 	{"prebuffer", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
+	{"bitrate", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
 	{"quality", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
+	{"expected_loss", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
 	{"volume", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
 	{"spatial_position", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
 	{"audio_level_average", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
@@ -1064,7 +1162,8 @@ static struct janus_json_parameter join_parameters[] = {
 };
 static struct janus_json_parameter record_parameters[] = {
 	{"record", JANUS_JSON_BOOL, JANUS_JSON_PARAM_REQUIRED},
-	{"record_file", JSON_STRING, 0}
+	{"record_file", JSON_STRING, 0},
+	{"record_dir", JSON_STRING, 0}
 };
 static struct janus_json_parameter rtp_parameters[] = {
 	{"ip", JSON_STRING, 0},
@@ -1076,8 +1175,11 @@ static struct janus_json_parameter rtp_parameters[] = {
 static struct janus_json_parameter configure_parameters[] = {
 	{"muted", JANUS_JSON_BOOL, 0},
 	{"prebuffer", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
+	{"bitrate", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
 	{"quality", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
+	{"expected_loss", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
 	{"volume", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
+	{"group", JSON_STRING, 0},
 	{"spatial_position", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
 	{"record", JANUS_JSON_BOOL, 0},
 	{"filename", JSON_STRING, 0},
@@ -1086,6 +1188,7 @@ static struct janus_json_parameter configure_parameters[] = {
 	{"update", JANUS_JSON_BOOL, 0}
 };
 static struct janus_json_parameter rtp_forward_parameters[] = {
+	{"group", JSON_STRING, 0},
 	{"ssrc", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
 	{"codec", JSON_STRING, 0},
 	{"ptype", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
@@ -1102,6 +1205,7 @@ static struct janus_json_parameter stop_rtp_forward_parameters[] = {
 static struct janus_json_parameter play_file_parameters[] = {
 	{"filename", JSON_STRING, JANUS_JSON_PARAM_REQUIRED},
 	{"file_id", JSON_STRING, 0},
+	{"group", JSON_STRING, 0},
 	{"loop", JANUS_JSON_BOOL, 0}
 };
 static struct janus_json_parameter checkstop_file_parameters[] = {
@@ -1161,10 +1265,13 @@ typedef struct janus_audiobridge_room {
 	gboolean audiolevel_ext;	/* Whether the ssrc-audio-level extension must be negotiated or not for new joins */
 	gboolean audiolevel_event;	/* Whether to emit event to other users about audiolevel */
 	uint default_prebuffering;	/* Number of packets to buffer before decoding each participant */
+	uint default_expectedloss;	/* Percent of packets we expect participants may miss, to help with FEC: can be overridden per-participant */
+	int32_t default_bitrate;	/* Default bitrate to use for all Opus streams when encoding */
 	int audio_active_packets;	/* Amount of packets with audio level for checkup */
 	int audio_level_average;	/* Average audio level */
 	volatile gint record;		/* Whether this room has to be recorded or not */
-	gchar *record_file;			/* Path of the recording file */
+	gchar *record_file;			/* Path of the recording file (absolute or relative, depending on record_dir) */
+	gchar *record_dir;			/* Folder to save the recording file to */
 	FILE *recording;			/* File to record the room into */
 	gint64 record_lastupdate;	/* Time when we last updated the wav header */
 	volatile gint wav_header_added;	/* If wav header is added in recording file */
@@ -1180,6 +1287,8 @@ typedef struct janus_audiobridge_room {
 	volatile gint destroyed;	/* Whether this room has been destroyed */
 	janus_mutex mutex;			/* Mutex to lock this room instance */
 	/* RTP forwarders for this room's mix */
+	GHashTable *groups;			/* Forwarding groups supported in this room, indexed by name */
+	GHashTable *groups_byid;	/* Forwarding groups supported in this room, indexed by numeric ID */
 	GHashTable *rtp_forwarders;	/* RTP forwarders list (as a hashmap) */
 	OpusEncoder *rtp_encoder;	/* Opus encoder instance to use for all RTP forwarders */
 	janus_mutex rtp_mutex;		/* Mutex to lock the RTP forwarders list */
@@ -1390,6 +1499,7 @@ typedef struct janus_audiobridge_participant {
 	volatile gint decoding;	/* Whether this participant is currently decoding */
 	gboolean muted;			/* Whether this participant is muted */
 	int volume_gain;		/* Gain to apply to the input audio (in percentage) */
+	int32_t opus_bitrate;	/* Bitrate to use for the Opus stream */
 	int opus_complexity;	/* Complexity to use in the encoder (by default, DEFAULT_COMPLEXITY) */
 	gboolean stereo;		/* Whether stereo will be used for spatial audio */
 	int spatial_position;	/* Panning of this participant in the mix */
@@ -1416,6 +1526,7 @@ typedef struct janus_audiobridge_participant {
 	OpusEncoder *encoder;		/* Opus encoder instance */
 	OpusDecoder *decoder;		/* Opus decoder instance */
 	gboolean fec;				/* Opus FEC status */
+	int expected_loss;			/* Percentage of expected loss, to configure libopus FEC behaviour (default=0, no FEC even if negotiated) */
 	uint16_t expected_seq;		/* Expected sequence number */
 	uint16_t probation; 		/* Used to determine new ssrc validity */
 	uint32_t last_timestamp;	/* Last in seq timestamp */
@@ -1425,6 +1536,7 @@ typedef struct janus_audiobridge_participant {
 #ifdef HAVE_LIBOGG
 	janus_audiobridge_file *annc;	/* In case this is a fake participant, a playable file */
 #endif
+	uint group;					/* Forwarding group index, if enabled in the room */
 	janus_mutex rec_mutex;		/* Mutex to protect the recorder from race conditions */
 	volatile gint destroyed;	/* Whether this room has been destroyed */
 	janus_refcount ref;			/* Reference counter for this participant */
@@ -1523,6 +1635,7 @@ static void janus_audiobridge_room_free(const janus_refcount *audiobridge_ref) {
 	g_free(audiobridge->room_secret);
 	g_free(audiobridge->room_pin);
 	g_free(audiobridge->record_file);
+	g_free(audiobridge->record_dir);
 	g_hash_table_destroy(audiobridge->participants);
 	g_hash_table_destroy(audiobridge->anncs);
 	g_hash_table_destroy(audiobridge->allowed);
@@ -1531,6 +1644,10 @@ static void janus_audiobridge_room_free(const janus_refcount *audiobridge_ref) {
 	if(audiobridge->rtp_encoder)
 		opus_encoder_destroy(audiobridge->rtp_encoder);
 	g_hash_table_destroy(audiobridge->rtp_forwarders);
+	if(audiobridge->groups)
+		g_hash_table_destroy(audiobridge->groups);
+	if(audiobridge->groups_byid)
+		g_hash_table_destroy(audiobridge->groups_byid);
 	g_free(audiobridge);
 }
 
@@ -1565,6 +1682,7 @@ typedef struct janus_audiobridge_rtp_forwarder {
 	int payload_type;
 	uint16_t seq_number;
 	uint32_t timestamp;
+	uint group;
 	gboolean always_on;
 	/* Only needed for SRTP forwarders */
 	gboolean is_srtp;
@@ -1588,7 +1706,7 @@ static void janus_audiobridge_rtp_forwarder_free(const janus_refcount *f_ref) {
 	g_free(rf);
 }
 static guint32 janus_audiobridge_rtp_forwarder_add_helper(janus_audiobridge_room *room,
-		const gchar *host, uint16_t port, uint32_t ssrc, int pt,
+		uint group, const gchar *host, uint16_t port, uint32_t ssrc, int pt,
 		janus_audiocodec codec, int srtp_suite, const char *srtp_crypto,
 		gboolean always_on, guint32 stream_id) {
 	if(room == NULL || host == NULL)
@@ -1648,6 +1766,7 @@ static guint32 janus_audiobridge_rtp_forwarder_add_helper(janus_audiobridge_room
 		rf->payload_type = 0;
 	rf->seq_number = 0;
 	rf->timestamp = 0;
+	rf->group = group;
 	rf->always_on = always_on;
 
 	janus_mutex_lock(&room->rtp_mutex);
@@ -1910,6 +2029,7 @@ static int janus_audiobridge_resample(int16_t *input, int input_num, int input_r
 #define JANUS_AUDIOBRIDGE_ERROR_ALREADY_JOINED	491
 #define JANUS_AUDIOBRIDGE_ERROR_NO_SUCH_USER	492
 #define JANUS_AUDIOBRIDGE_ERROR_INVALID_SDP		493
+#define JANUS_AUDIOBRIDGE_ERROR_NO_SUCH_GROUP	494
 
 static int janus_audiobridge_create_udp_socket_if_needed(janus_audiobridge_room *audiobridge) {
 	if(audiobridge->rtp_udp_sock > 0) {
@@ -1958,6 +2078,15 @@ static int janus_audiobridge_create_opus_encoder_if_needed(janus_audiobridge_roo
 		opus_encoder_ctl(audiobridge->rtp_encoder, OPUS_SET_MAX_BANDWIDTH(OPUS_BANDWIDTH_WIDEBAND));
 	}
 
+	/* Check if we need FEC */
+	if(audiobridge->default_expectedloss > 0) {
+		opus_encoder_ctl(audiobridge->rtp_encoder, OPUS_SET_INBAND_FEC(TRUE));
+		opus_encoder_ctl(audiobridge->rtp_encoder, OPUS_SET_PACKET_LOSS_PERC(audiobridge->default_expectedloss));
+	}
+	/* Also check if we need to enforce a bitrate */
+	if(audiobridge->default_bitrate > 0)
+		opus_encoder_ctl(audiobridge->rtp_encoder, OPUS_SET_BITRATE(audiobridge->default_bitrate));
+
 	return 0;
 }
 
@@ -1994,6 +2123,19 @@ static int janus_audiobridge_create_static_rtp_forwarder(janus_config_category *
 		if(ptype < 0 || ptype > 127) {
 			JANUS_LOG(LOG_ERR, "Invalid payload type (%s)\n", pt->value);
 			return 0;
+		}
+	}
+
+	/* If this room uses groups, check if a valid group name was provided */
+	uint group = 0;
+	if(audiobridge->groups != NULL) {
+		janus_config_item *group_name = janus_config_get(config, cat, janus_config_type_item, "rtp_forward_group");
+		if(group_name != NULL && group_name->value != NULL) {
+			group = GPOINTER_TO_UINT(g_hash_table_lookup(audiobridge->groups, group_name->value));
+			if(group == 0) {
+				JANUS_LOG(LOG_ERR, "Invalid group name (%s)\n", group_name->value);
+				return 0;
+			}
 		}
 	}
 
@@ -2094,7 +2236,7 @@ static int janus_audiobridge_create_static_rtp_forwarder(janus_config_category *
 		return -1;
 	}
 
-	janus_audiobridge_rtp_forwarder_add_helper(audiobridge,
+	janus_audiobridge_rtp_forwarder_add_helper(audiobridge, group,
 		host, port, ssrc_value, ptype, codec, srtp_suite, srtp_crypto,
 		always_on, forwarder_id);
 
@@ -2248,10 +2390,14 @@ int janus_audiobridge_init(janus_callbacks *callback, const char *config_path) {
 			janus_config_item *audio_active_packets = janus_config_get(config, cat, janus_config_type_item, "audio_active_packets");
 			janus_config_item *audio_level_average = janus_config_get(config, cat, janus_config_type_item, "audio_level_average");
 			janus_config_item *default_prebuffering = janus_config_get(config, cat, janus_config_type_item, "default_prebuffering");
+			janus_config_item *default_expectedloss = janus_config_get(config, cat, janus_config_type_item, "default_expectedloss");
+			janus_config_item *default_bitrate = janus_config_get(config, cat, janus_config_type_item, "default_bitrate");
 			janus_config_item *secret = janus_config_get(config, cat, janus_config_type_item, "secret");
 			janus_config_item *pin = janus_config_get(config, cat, janus_config_type_item, "pin");
+			janus_config_array *groups = janus_config_get(config, cat, janus_config_type_array, "groups");
 			janus_config_item *record = janus_config_get(config, cat, janus_config_type_item, "record");
 			janus_config_item *recfile = janus_config_get(config, cat, janus_config_type_item, "record_file");
+			janus_config_item *recdir = janus_config_get(config, cat, janus_config_type_item, "record_dir");
 			janus_config_item *allowrtp = janus_config_get(config, cat, janus_config_type_item, "allow_rtp_participants");
 			if(sampling == NULL || sampling->value == NULL) {
 				JANUS_LOG(LOG_ERR, "Can't add the AudioBridge room, missing mandatory information...\n");
@@ -2260,6 +2406,7 @@ int janus_audiobridge_init(janus_callbacks *callback, const char *config_path) {
 			}
 			/* Create the AudioBridge room */
 			janus_audiobridge_room *audiobridge = g_malloc0(sizeof(janus_audiobridge_room));
+			janus_refcount_init(&audiobridge->ref, janus_audiobridge_room_free);
 			const char *room_num = cat->name;
 			if(strstr(room_num, "room-") == room_num)
 				room_num += 5;
@@ -2267,7 +2414,7 @@ int janus_audiobridge_init(janus_callbacks *callback, const char *config_path) {
 				audiobridge->room_id = g_ascii_strtoull(room_num, NULL, 0);
 				if(audiobridge->room_id == 0) {
 					JANUS_LOG(LOG_ERR, "Can't add the AudioBridge room, invalid ID 0...\n");
-					g_free(audiobridge);
+					janus_audiobridge_room_destroy(audiobridge);
 					cl = cl->next;
 					continue;
 				}
@@ -2276,7 +2423,7 @@ int janus_audiobridge_init(janus_callbacks *callback, const char *config_path) {
 				g_snprintf(room_id_str, sizeof(room_id_str), "%"SCNu64, audiobridge->room_id);
 				if(strcmp(room_num, room_id_str)) {
 					JANUS_LOG(LOG_ERR, "Can't add the AudioBridge room, ID '%s' is not numeric...\n", room_num);
-					g_free(audiobridge);
+					janus_audiobridge_room_destroy(audiobridge);
 					cl = cl->next;
 					continue;
 				}
@@ -2287,7 +2434,7 @@ int janus_audiobridge_init(janus_callbacks *callback, const char *config_path) {
 				/* It does... */
 				janus_mutex_unlock(&rooms_mutex);
 				JANUS_LOG(LOG_ERR, "Can't add the AudioBridge room, room %s already exists...\n", room_num);
-				g_free(audiobridge);
+				janus_audiobridge_room_destroy(audiobridge);
 				cl = cl->next;
 				continue;
 			}
@@ -2311,6 +2458,7 @@ int janus_audiobridge_init(janus_callbacks *callback, const char *config_path) {
 					break;
 				default:
 					JANUS_LOG(LOG_ERR, "Unsupported sampling rate %"SCNu32"...\n", audiobridge->sampling_rate);
+					janus_audiobridge_room_destroy(audiobridge);
 					cl = cl->next;
 					continue;
 			}
@@ -2348,6 +2496,23 @@ int janus_audiobridge_init(janus_callbacks *callback, const char *config_path) {
 					audiobridge->default_prebuffering = prebuffering;
 				}
 			}
+			audiobridge->default_expectedloss = 0;
+			if(default_expectedloss != NULL && default_expectedloss->value != NULL) {
+				int expectedloss = atoi(default_expectedloss->value);
+				if(expectedloss < 0 || expectedloss > 20) {
+					JANUS_LOG(LOG_WARN, "Invalid expectedloss value provided, using default: 0\n");
+				} else {
+					audiobridge->default_expectedloss = expectedloss;
+				}
+			}
+			audiobridge->default_bitrate = 0;
+			if(default_bitrate != NULL && default_bitrate->value != NULL) {
+				audiobridge->default_bitrate = atoi(default_bitrate->value);
+				if(audiobridge->default_bitrate < 500 || audiobridge->default_bitrate > 512000) {
+					JANUS_LOG(LOG_WARN, "Invalid bitrate %"SCNi32", falling back to auto\n", audiobridge->default_bitrate);
+					audiobridge->default_bitrate = 0;
+				}
+			}
 			audiobridge->room_ssrc = janus_random_uint32();
 			if(secret != NULL && secret->value != NULL) {
 				audiobridge->room_secret = g_strdup(secret->value);
@@ -2360,6 +2525,13 @@ int janus_audiobridge_init(janus_callbacks *callback, const char *config_path) {
 				g_atomic_int_set(&audiobridge->record, 1);
 			if(recfile && recfile->value)
 				audiobridge->record_file = g_strdup(recfile->value);
+			if(recdir && recdir->value) {
+				audiobridge->record_dir = g_strdup(recdir->value);
+				if(janus_mkdir(audiobridge->record_dir, 0755) < 0) {
+					/* FIXME Should this be fatal, when creating a room? */
+					JANUS_LOG(LOG_WARN, "AudioBridge mkdir (%s) error: %d (%s)\n", audiobridge->record_dir, errno, g_strerror(errno));
+				}
+			}
 			audiobridge->recording = NULL;
 			audiobridge->allow_plainrtp = FALSE;
 			if(allowrtp && allowrtp->value)
@@ -2372,13 +2544,48 @@ int janus_audiobridge_init(janus_callbacks *callback, const char *config_path) {
 				(GDestroyNotify)g_free, (GDestroyNotify)janus_audiobridge_participant_unref);
 			audiobridge->check_tokens = FALSE;	/* Static rooms can't have an "allowed" list yet, no hooks to the configuration file */
 			audiobridge->allowed = g_hash_table_new_full(g_str_hash, g_str_equal, (GDestroyNotify)g_free, NULL);
+			if(groups != NULL) {
+				/* Populate the group hashtable, and create the related indexes */
+				GList *gl = groups->list;
+				if(g_list_length(gl) > JANUS_AUDIOBRIDGE_MAX_GROUPS) {
+					JANUS_LOG(LOG_ERR, "Too many groups specified in room %s (max %d allowed)\n", room_num, JANUS_AUDIOBRIDGE_MAX_GROUPS);
+					janus_refcount_decrease(&audiobridge->ref);
+					cl = cl->next;
+				}
+				int count = 0;
+				audiobridge->groups = g_hash_table_new_full(g_str_hash, g_str_equal, (GDestroyNotify)g_free, NULL);
+				audiobridge->groups_byid = g_hash_table_new_full(NULL, NULL, NULL, (GDestroyNotify)g_free);
+				while(gl) {
+					janus_config_item *g = (janus_config_item *)gl->data;
+					if(g == NULL || g->type != janus_config_type_item || g->name != NULL || g->value == NULL) {
+						JANUS_LOG(LOG_WARN, "  -- Invalid group item (not a string?), skipping in '%s'...\n", cat->name);
+						gl = gl->next;
+						continue;
+					}
+					const char *name = g->value;
+					if(g_hash_table_lookup(audiobridge->groups, name)) {
+						JANUS_LOG(LOG_WARN, "Duplicated group name '%s', skipping\n", name);
+					} else {
+						count++;
+						g_hash_table_insert(audiobridge->groups, g_strdup(name), GUINT_TO_POINTER(count));
+						g_hash_table_insert(audiobridge->groups_byid, GUINT_TO_POINTER(count), g_strdup(name));
+					}
+					gl = gl->next;
+				}
+				if(count == 0) {
+					JANUS_LOG(LOG_WARN, "Empty or invalid groups array provided, groups will be disabled in '%s'...\n", cat->name);
+					g_hash_table_destroy(audiobridge->groups);
+					g_hash_table_destroy(audiobridge->groups_byid);
+					audiobridge->groups = NULL;
+					audiobridge->groups_byid = NULL;
+				}
+			}
 			g_atomic_int_set(&audiobridge->destroyed, 0);
 			janus_mutex_init(&audiobridge->mutex);
 			audiobridge->rtp_forwarders = g_hash_table_new_full(NULL, NULL, NULL, (GDestroyNotify)janus_audiobridge_rtp_forwarder_destroy);
 			audiobridge->rtp_encoder = NULL;
 			audiobridge->rtp_udp_sock = -1;
 			janus_mutex_init(&audiobridge->rtp_mutex);
-			janus_refcount_init(&audiobridge->ref, janus_audiobridge_room_free);
 			JANUS_LOG(LOG_VERB, "Created AudioBridge room: %s (%s, %s, secret: %s, pin: %s)\n",
 				audiobridge->room_id_str, audiobridge->room_name,
 				audiobridge->is_private ? "private" : "public",
@@ -2591,6 +2798,11 @@ json_t *janus_audiobridge_query_session(janus_plugin_session *handle) {
 			json_object_set_new(info, "room", string_ids ? json_string(room->room_id_str) : json_integer(room->room_id));
 		janus_mutex_unlock(&rooms_mutex);
 		json_object_set_new(info, "id", string_ids ? json_string(participant->user_id_str) : json_integer(participant->user_id));
+		if(participant->group > 0 && room->groups_byid != NULL) {
+			char *name = g_hash_table_lookup(room->groups_byid, GUINT_TO_POINTER(participant->group));
+			if(name != NULL)
+				json_object_set_new(info, "group", json_string(name));
+		}
 		if(participant->display)
 			json_object_set_new(info, "display", json_string(participant->display));
 		if(participant->admin)
@@ -2617,6 +2829,10 @@ json_t *janus_audiobridge_query_session(janus_plugin_session *handle) {
 			json_object_set_new(info, "talking", participant->talking ? json_true() : json_false());
 		}
 		json_object_set_new(info, "fec", participant->fec ? json_true() : json_false());
+		if(participant->fec)
+			json_object_set_new(info, "expected-loss", json_integer(participant->expected_loss));
+		if(participant->opus_bitrate)
+			json_object_set_new(info, "opus-bitrate", json_integer(participant->opus_bitrate));
 		if(participant->plainrtp_media.audio_rtp_fd != -1) {
 			json_t *rtp = json_object();
 			if(local_ip)
@@ -2741,8 +2957,12 @@ static json_t *janus_audiobridge_process_synchronous_request(janus_audiobridge_s
 		json_t *audio_active_packets = json_object_get(root, "audio_active_packets");
 		json_t *audio_level_average = json_object_get(root, "audio_level_average");
 		json_t *default_prebuffering = json_object_get(root, "default_prebuffering");
+		json_t *default_expectedloss = json_object_get(root, "default_expectedloss");
+		json_t *default_bitrate = json_object_get(root, "default_bitrate");
+		json_t *groups = json_object_get(root, "groups");
 		json_t *record = json_object_get(root, "record");
 		json_t *recfile = json_object_get(root, "record_file");
+		json_t *recdir = json_object_get(root, "record_dir");
 		json_t *allowrtp = json_object_get(root, "allow_rtp_participants");
 		json_t *permanent = json_object_get(root, "permanent");
 		if(allowed) {
@@ -2762,6 +2982,32 @@ static json_t *janus_audiobridge_process_synchronous_request(janus_audiobridge_s
 				JANUS_LOG(LOG_ERR, "Invalid element in the allowed array (not a string)\n");
 				error_code = JANUS_AUDIOBRIDGE_ERROR_INVALID_ELEMENT;
 				g_snprintf(error_cause, 512, "Invalid element in the allowed array (not a string)");
+				goto prepare_response;
+			}
+		}
+		if(groups) {
+			/* Make sure the "groups" array only contains strings */
+			gboolean ok = TRUE;
+			if(json_array_size(groups) > 0) {
+				if(json_array_size(groups) > JANUS_AUDIOBRIDGE_MAX_GROUPS) {
+					JANUS_LOG(LOG_ERR, "Too many groups specified (max %d allowed)\n", JANUS_AUDIOBRIDGE_MAX_GROUPS);
+					error_code = JANUS_AUDIOBRIDGE_ERROR_INVALID_ELEMENT;
+					g_snprintf(error_cause, 512, "Too many groups specified (max %d allowed)", JANUS_AUDIOBRIDGE_MAX_GROUPS);
+					goto prepare_response;
+				}
+				size_t i = 0;
+				for(i=0; i<json_array_size(groups); i++) {
+					json_t *a = json_array_get(groups, i);
+					if(!a || !json_is_string(a)) {
+						ok = FALSE;
+						break;
+					}
+				}
+			}
+			if(!ok) {
+				JANUS_LOG(LOG_ERR, "Invalid element in the groups array (not a string)\n");
+				error_code = JANUS_AUDIOBRIDGE_ERROR_INVALID_ELEMENT;
+				g_snprintf(error_cause, 512, "Invalid element in the groups array (not a string)");
 				goto prepare_response;
 			}
 		}
@@ -2799,6 +3045,7 @@ static json_t *janus_audiobridge_process_synchronous_request(janus_audiobridge_s
 		}
 		/* Create the AudioBridge room */
 		janus_audiobridge_room *audiobridge = g_malloc0(sizeof(janus_audiobridge_room));
+		janus_refcount_init(&audiobridge->ref, janus_audiobridge_room_free);
 		/* Generate a random ID, if needed */
 		gboolean room_id_allocated = FALSE;
 		if(!string_ids && room_id == 0) {
@@ -2867,6 +3114,23 @@ static json_t *janus_audiobridge_process_synchronous_request(janus_audiobridge_s
 			JANUS_LOG(LOG_WARN, "Invalid default_prebuffering value provided (too high), using default: %d\n",
 				audiobridge->default_prebuffering);
 		}
+		audiobridge->default_expectedloss = 0;
+		if(default_expectedloss != NULL) {
+			int expectedloss = json_integer_value(default_expectedloss);
+			if(expectedloss > 20) {
+				JANUS_LOG(LOG_WARN, "Invalid expectedloss value provided, using default: 0\n");
+			} else {
+				audiobridge->default_expectedloss = expectedloss;
+			}
+		}
+		audiobridge->default_bitrate = 0;
+		if(default_bitrate != NULL) {
+			audiobridge->default_bitrate = json_integer_value(default_bitrate);
+			if(audiobridge->default_bitrate < 500 || audiobridge->default_bitrate > 512000) {
+				JANUS_LOG(LOG_WARN, "Invalid bitrate %"SCNi32", falling back to auto\n", audiobridge->default_bitrate);
+				audiobridge->default_bitrate = 0;
+			}
+		}
 		switch(audiobridge->sampling_rate) {
 			case 8000:
 			case 12000:
@@ -2878,10 +3142,12 @@ static json_t *janus_audiobridge_process_synchronous_request(janus_audiobridge_s
 			default:
 				if(room_id_allocated)
 					g_free(room_id_str);
+				janus_audiobridge_room_destroy(audiobridge);
 				janus_mutex_unlock(&rooms_mutex);
 				JANUS_LOG(LOG_ERR, "Unsupported sampling rate %"SCNu32"...\n", audiobridge->sampling_rate);
 				error_code = JANUS_AUDIOBRIDGE_ERROR_UNKNOWN_ERROR;
-				g_snprintf(error_cause, 512, "We currently only support 16kHz (wideband) as a sampling rate for audio rooms, %"SCNu32" TBD...", audiobridge->sampling_rate);
+				g_snprintf(error_cause, 512, "Unsupported sampling rate %"SCNu32, audiobridge->sampling_rate);
+				janus_audiobridge_room_destroy(audiobridge);
 				goto prepare_response;
 		}
 		audiobridge->room_ssrc = janus_random_uint32();
@@ -2890,6 +3156,13 @@ static json_t *janus_audiobridge_process_synchronous_request(janus_audiobridge_s
 			g_atomic_int_set(&audiobridge->record, 1);
 		if(recfile)
 			audiobridge->record_file = g_strdup(json_string_value(recfile));
+		if(recdir) {
+			audiobridge->record_dir = g_strdup(json_string_value(recdir));
+			if(janus_mkdir(audiobridge->record_dir, 0755) < 0) {
+				/* FIXME Should this be fatal, when creating a room? */
+				JANUS_LOG(LOG_WARN, "AudioBridge mkdir (%s) error: %d (%s)\n", audiobridge->record_dir, errno, g_strerror(errno));
+			}
+		}
 		audiobridge->recording = NULL;
 		audiobridge->allow_plainrtp = FALSE;
 		if(allowrtp && json_is_true(allowrtp))
@@ -2915,11 +3188,34 @@ static json_t *janus_audiobridge_process_synchronous_request(janus_audiobridge_s
 		}
 		g_atomic_int_set(&audiobridge->destroyed, 0);
 		janus_mutex_init(&audiobridge->mutex);
+		if(groups != NULL && json_array_size(groups) > 0) {
+			/* Populate the group hashtable, and create the related indexes */
+			audiobridge->groups = g_hash_table_new_full(g_str_hash, g_str_equal, (GDestroyNotify)g_free, NULL);
+			audiobridge->groups_byid = g_hash_table_new_full(NULL, NULL, NULL, (GDestroyNotify)g_free);
+			size_t i = 0;
+			int count = 0;
+			for(i=0; i<json_array_size(groups); i++) {
+				const char *name = json_string_value(json_array_get(groups, i));
+				if(g_hash_table_lookup(audiobridge->groups, name)) {
+					JANUS_LOG(LOG_WARN, "Duplicated group name '%s', skipping\n", name);
+				} else {
+					count++;
+					g_hash_table_insert(audiobridge->groups, g_strdup(name), GUINT_TO_POINTER(count));
+					g_hash_table_insert(audiobridge->groups_byid, GUINT_TO_POINTER(count), g_strdup(name));
+				}
+			}
+			if(count == 0) {
+				JANUS_LOG(LOG_WARN, "Empty or invalid groups array provided, groups will be disabled\n");
+				g_hash_table_destroy(audiobridge->groups);
+				g_hash_table_destroy(audiobridge->groups_byid);
+				audiobridge->groups = NULL;
+				audiobridge->groups_byid = NULL;
+			}
+		}
 		audiobridge->rtp_forwarders = g_hash_table_new_full(NULL, NULL, NULL, (GDestroyNotify)janus_audiobridge_rtp_forwarder_destroy);
 		audiobridge->rtp_encoder = NULL;
 		audiobridge->rtp_udp_sock = -1;
 		janus_mutex_init(&audiobridge->rtp_mutex);
-		janus_refcount_init(&audiobridge->ref, janus_audiobridge_room_free);
 		g_hash_table_insert(rooms,
 			string_ids ? (gpointer)g_strdup(audiobridge->room_id_str) : (gpointer)janus_uint64_dup(audiobridge->room_id),
 			audiobridge);
@@ -2986,9 +3282,22 @@ static json_t *janus_audiobridge_process_synchronous_request(janus_audiobridge_s
 			}
 			if(audiobridge->allow_plainrtp)
 				janus_config_add(config, c, janus_config_item_create("allow_rtp_participants", "yes"));
+			if(audiobridge->groups) {
+				/* Save array of groups */
+				janus_config_array *gl = janus_config_array_create("groups");
+				janus_config_add(config, c, gl);
+				GHashTableIter iter;
+				gpointer key;
+				g_hash_table_iter_init(&iter, audiobridge->groups);
+				while(g_hash_table_iter_next(&iter, &key, NULL)) {
+					janus_config_add(config, gl, janus_config_item_create(NULL, (char *)key));
+				}
+			}
 			if(audiobridge->record_file) {
 				janus_config_add(config, c, janus_config_item_create("record", "yes"));
 				janus_config_add(config, c, janus_config_item_create("record_file", audiobridge->record_file));
+				if(audiobridge->record_dir)
+					janus_config_add(config, c, janus_config_item_create("record_dir", audiobridge->record_dir));
 			}
 			if(audiobridge->spatial_audio)
 				janus_config_add(config, c, janus_config_item_create("spatial_audio", "yes"));
@@ -3039,6 +3348,7 @@ static json_t *janus_audiobridge_process_synchronous_request(janus_audiobridge_s
 		json_t *secret = json_object_get(root, "new_secret");
 		json_t *pin = json_object_get(root, "new_pin");
 		json_t *is_private = json_object_get(root, "new_is_private");
+		json_t *recdir = json_object_get(root, "record_dir");
 		json_t *permanent = json_object_get(root, "permanent");
 		gboolean save = permanent ? json_is_true(permanent) : FALSE;
 		if(save && config == NULL) {
@@ -3096,6 +3406,12 @@ static json_t *janus_audiobridge_process_synchronous_request(janus_audiobridge_s
 			audiobridge->room_pin = new_pin;
 			g_free(old_pin);
 		}
+		if(recdir) {
+			char *old_record_dir = audiobridge->record_dir;
+			char *new_record_dir = g_strdup(json_string_value(recdir));
+			audiobridge->record_dir = new_record_dir;
+			g_free(old_record_dir);
+		}
 		if(save) {
 			/* This change is permanent: save to the configuration file too
 			 * FIXME: We should check if anything fails... */
@@ -3136,9 +3452,22 @@ static json_t *janus_audiobridge_process_synchronous_request(janus_audiobridge_s
 			}
 			if(audiobridge->allow_plainrtp)
 				janus_config_add(config, c, janus_config_item_create("allow_rtp_participants", "yes"));
+			if(audiobridge->groups) {
+				/* Save array of groups */
+				janus_config_array *gl = janus_config_array_create("groups");
+				janus_config_add(config, c, gl);
+				GHashTableIter iter;
+				gpointer key;
+				g_hash_table_iter_init(&iter, audiobridge->groups);
+				while(g_hash_table_iter_next(&iter, &key, NULL)) {
+					janus_config_add(config, gl, janus_config_item_create(NULL, (char *)key));
+				}
+			}
 			if(audiobridge->record_file) {
 				janus_config_add(config, c, janus_config_item_create("record", "yes"));
 				janus_config_add(config, c, janus_config_item_create("record_file", audiobridge->record_file));
+				if(audiobridge->record_dir)
+					janus_config_add(config, c, janus_config_item_create("record_dir", audiobridge->record_dir));
 			}
 			if(audiobridge->spatial_audio)
 				janus_config_add(config, c, janus_config_item_create("spatial_audio", "yes"));
@@ -3301,19 +3630,30 @@ static json_t *janus_audiobridge_process_synchronous_request(janus_audiobridge_s
 			goto prepare_response;
 		json_t *record = json_object_get(root, "record");
 		json_t *recfile = json_object_get(root, "record_file");
+		json_t *recdir = json_object_get(root, "record_dir");
 		gboolean recording_active = json_is_true(record);
 		/* Lookup room */
 		janus_mutex_lock(&rooms_mutex);
 		janus_audiobridge_room *audiobridge = NULL;
 		error_code = janus_audiobridge_access_room(root, TRUE, &audiobridge, error_cause, sizeof(error_cause));
 		if(error_code != 0) {
-			JANUS_LOG(LOG_ERR, "Failed to access audiobridge\n");
 			janus_mutex_unlock(&rooms_mutex);
+			JANUS_LOG(LOG_ERR, "Failed to access room\n");
 			goto prepare_response;
 		}
-		janus_mutex_unlock(&rooms_mutex);
 		/* Set recording status */
 		gint room_prev_recording_active = recording_active ? 1 : 0;
+		/* Check if we need to create a folder */
+		if(recording_active && recdir != NULL) {
+			if(janus_mkdir(json_string_value(recdir), 0755) < 0) {
+				/* FIXME Should this be fatal, when creating a room? */
+				janus_mutex_unlock(&rooms_mutex);
+				JANUS_LOG(LOG_ERR, "AudioBridge mkdir (%s) error: %d (%s)\n", audiobridge->record_dir, errno, g_strerror(errno));
+				error_code = JANUS_AUDIOBRIDGE_ERROR_UNKNOWN_ERROR;
+				g_snprintf(error_cause, 512, "mkdir error: %d (%s)", errno, g_strerror(errno));
+				goto prepare_response;
+			}
+		}
 		if(room_prev_recording_active != g_atomic_int_get(&audiobridge->record)) {
 			/* Room recording state has changed */
 			JANUS_LOG(LOG_VERB, "Recording status changed: prev=%d, curr=%d\n", g_atomic_int_get(&audiobridge->record), recording_active);
@@ -3321,12 +3661,18 @@ static json_t *janus_audiobridge_process_synchronous_request(janus_audiobridge_s
 			if(recfile && recording_active) {
 				g_free(audiobridge->record_file);
 				audiobridge->record_file = g_strdup(json_string_value(recfile));
-				JANUS_LOG(LOG_VERB, "Recording file path: %s\n", audiobridge->record_file);
+				JANUS_LOG(LOG_VERB, "Recording file: %s\n", audiobridge->record_file);
+			}
+			if(recdir && recording_active) {
+				g_free(audiobridge->record_dir);
+				audiobridge->record_dir = g_strdup(json_string_value(recdir));
+				JANUS_LOG(LOG_VERB, "Recording folder: %s\n", audiobridge->record_dir);
 			}
 		}
 		response = json_object();
 		json_object_set_new(response, "audiobridge", json_string("success"));
 		json_object_set_new(response, "record", json_boolean(g_atomic_int_get(&audiobridge->record)));
+		janus_mutex_unlock(&rooms_mutex);
 		goto prepare_response;
 	} else if(!strcasecmp(request_text, "list")) {
 		/* List all rooms (but private ones) and their details (except for the secret, of course...) */
@@ -4144,6 +4490,22 @@ static json_t *janus_audiobridge_process_synchronous_request(janus_audiobridge_s
 			g_snprintf(error_cause, 512, "No such room (%s)", room_id_str);
 			goto prepare_response;
 		}
+		/* If this room uses groups, check if a valid group name was provided */
+		uint group = 0;
+		const char *group_name = NULL;
+		if(audiobridge->groups != NULL) {
+			group_name = json_string_value(json_object_get(root, "group"));
+			if(group_name != NULL) {
+				group = GPOINTER_TO_UINT(g_hash_table_lookup(audiobridge->groups, group_name));
+				if(group == 0) {
+					janus_mutex_unlock(&audiobridge->mutex);
+					janus_mutex_unlock(&rooms_mutex);
+					error_code = JANUS_AUDIOBRIDGE_ERROR_NO_SUCH_GROUP;
+					g_snprintf(error_cause, 512, "No such group");
+					goto prepare_response;
+				}
+			}
+		}
 
 		if(janus_audiobridge_create_udp_socket_if_needed(audiobridge)) {
 			janus_mutex_unlock(&audiobridge->mutex);
@@ -4161,7 +4523,7 @@ static json_t *janus_audiobridge_process_synchronous_request(janus_audiobridge_s
 			goto prepare_response;
 		}
 
-		guint32 stream_id = janus_audiobridge_rtp_forwarder_add_helper(audiobridge,
+		guint32 stream_id = janus_audiobridge_rtp_forwarder_add_helper(audiobridge, group,
 			host, port, ssrc_value, ptype, codec, srtp_suite, srtp_crypto, always_on, 0);
 		janus_mutex_unlock(&audiobridge->mutex);
 		janus_mutex_unlock(&rooms_mutex);
@@ -4170,6 +4532,8 @@ static json_t *janus_audiobridge_process_synchronous_request(janus_audiobridge_s
 		response = json_object();
 		json_object_set_new(response, "audiobridge", json_string("success"));
 		json_object_set_new(response, "room", string_ids ? json_string(room_id_str) : json_integer(room_id));
+		if(group_name != NULL)
+			json_object_set_new(response, "group", json_string(group_name));
 		json_object_set_new(response, "stream_id", json_integer(stream_id));
 		json_object_set_new(response, "host", json_string(host));
 		json_object_set_new(response, "port", json_integer(port));
@@ -4310,6 +4674,11 @@ static json_t *janus_audiobridge_process_synchronous_request(janus_audiobridge_s
 			janus_audiobridge_rtp_forwarder *rf = (janus_audiobridge_rtp_forwarder *)value;
 			json_t *fl = json_object();
 			json_object_set_new(fl, "stream_id", json_integer(stream_id));
+			if(rf->group > 0 && audiobridge->groups_byid != NULL) {
+				char *name = g_hash_table_lookup(audiobridge->groups_byid, GUINT_TO_POINTER(rf->group));
+				if(name != NULL)
+					json_object_set_new(fl, "group", json_string(name));
+			}
 			char address[100];
 			if(rf->serv_addr.sin_family == AF_INET) {
 				json_object_set_new(fl, "ip", json_string(
@@ -4407,6 +4776,28 @@ static json_t *janus_audiobridge_process_synchronous_request(janus_audiobridge_s
 			g_snprintf(error_cause, 512, "No such room (%s)", room_id_str);
 			goto prepare_response;
 		}
+		/* If this room uses groups, make sure a valid group name was provided */
+		uint group = 0;
+		if(audiobridge->groups != NULL) {
+			JANUS_VALIDATE_JSON_OBJECT(root, group_parameters,
+				error_code, error_cause, TRUE,
+				JANUS_AUDIOBRIDGE_ERROR_MISSING_ELEMENT, JANUS_AUDIOBRIDGE_ERROR_INVALID_ELEMENT);
+			if(error_code != 0) {
+				janus_mutex_unlock(&audiobridge->mutex);
+				janus_mutex_unlock(&rooms_mutex);
+				goto prepare_response;
+			}
+			const char *group_name = json_string_value(json_object_get(root, "group"));
+			group = GPOINTER_TO_UINT(g_hash_table_lookup(audiobridge->groups, group_name));
+			if(group == 0) {
+				janus_mutex_unlock(&audiobridge->mutex);
+				janus_mutex_unlock(&rooms_mutex);
+				JANUS_LOG(LOG_ERR, "No such group (%s)\n", group_name);
+				error_code = JANUS_AUDIOBRIDGE_ERROR_NO_SUCH_GROUP;
+				g_snprintf(error_cause, 512, "No such group (%s)", group_name);
+				goto prepare_response;
+			}
+		}
 		/* Check if an announcement ID has been provided, or generate a random one */
 		json_t *id = json_object_get(root, "file_id");
 		char *file_id = (char *)json_string_value(id);
@@ -4442,6 +4833,7 @@ static json_t *janus_audiobridge_process_synchronous_request(janus_audiobridge_s
 		p->annc = g_malloc0(sizeof(janus_audiobridge_file));
 		p->annc->id = g_strdup(file_id);
 		p->room = audiobridge;
+		p->group = group;
 		const char *filename = json_string_value(json_object_get(root, "filename"));
 		p->annc->filename = g_strdup(filename);
 		p->annc->file = fopen(filename, "rb");
@@ -4455,7 +4847,6 @@ static json_t *janus_audiobridge_process_synchronous_request(janus_audiobridge_s
 			error_code = JANUS_AUDIOBRIDGE_ERROR_UNKNOWN_ERROR;
 			g_snprintf(error_cause, 512, "Error opening file");
 			goto prepare_response;
-
 		}
 		p->annc->loop = json_is_true(json_object_get(root, "loop"));
 		/* Setup the opus decoder */
@@ -5557,13 +5948,37 @@ static void *janus_audiobridge_handler(void *data) {
 				}
 				admin = TRUE;
 			}
+			/* If this room uses groups, make sure a valid group name was provided */
+			uint group = 0;
+			if(audiobridge->groups != NULL) {
+				JANUS_VALIDATE_JSON_OBJECT(root, group_parameters,
+					error_code, error_cause, TRUE,
+					JANUS_AUDIOBRIDGE_ERROR_MISSING_ELEMENT, JANUS_AUDIOBRIDGE_ERROR_INVALID_ELEMENT);
+				if(error_code != 0) {
+					janus_mutex_unlock(&audiobridge->mutex);
+					janus_refcount_decrease(&audiobridge->ref);
+					goto error;
+				}
+				const char *group_name = json_string_value(json_object_get(root, "group"));
+				group = GPOINTER_TO_UINT(g_hash_table_lookup(audiobridge->groups, group_name));
+				if(group == 0) {
+					janus_mutex_unlock(&audiobridge->mutex);
+					janus_refcount_decrease(&audiobridge->ref);
+					JANUS_LOG(LOG_ERR, "No such group (%s)\n", group_name);
+					error_code = JANUS_AUDIOBRIDGE_ERROR_NO_SUCH_GROUP;
+					g_snprintf(error_cause, 512, "No such group (%s)", group_name);
+					goto error;
+				}
+			}
 			json_t *display = json_object_get(root, "display");
 			const char *display_text = display ? json_string_value(display) : NULL;
 			json_t *muted = json_object_get(root, "muted");
 			json_t *prebuffer = json_object_get(root, "prebuffer");
 			json_t *gain = json_object_get(root, "volume");
 			json_t *spatial = json_object_get(root, "spatial_position");
+			json_t *bitrate = json_object_get(root, "bitrate");
 			json_t *quality = json_object_get(root, "quality");
+			json_t *exploss = json_object_get(root, "expected_loss");
 			json_t *acodec = json_object_get(root, "codec");
 			json_t *user_audio_level_average = json_object_get(root, "audio_level_average");
 			json_t *user_audio_active_packets = json_object_get(root, "audio_active_packets");
@@ -5578,6 +5993,14 @@ static void *janus_audiobridge_handler(void *data) {
 			}
 			int volume = gain ? json_integer_value(gain) : 100;
 			int spatial_position = spatial ? json_integer_value(spatial) : 50;
+			int32_t opus_bitrate = audiobridge->default_bitrate;
+			if(bitrate) {
+				opus_bitrate = json_integer_value(bitrate);
+				if(opus_bitrate < 500 || opus_bitrate > 512000) {
+					JANUS_LOG(LOG_WARN, "Invalid bitrate %"SCNi32", falling back to default/auto\n", opus_bitrate);
+					opus_bitrate = audiobridge->default_bitrate;
+				}
+			}
 			int complexity = quality ? json_integer_value(quality) : DEFAULT_COMPLEXITY;
 			if(complexity < 1 || complexity > 10) {
 				janus_mutex_unlock(&audiobridge->mutex);
@@ -5585,6 +6008,15 @@ static void *janus_audiobridge_handler(void *data) {
 				JANUS_LOG(LOG_ERR, "Invalid element (quality should be a positive integer between 1 and 10)\n");
 				error_code = JANUS_AUDIOBRIDGE_ERROR_INVALID_ELEMENT;
 				g_snprintf(error_cause, 512, "Invalid element (quality should be a positive integer between 1 and 10)");
+				goto error;
+			}
+			int expected_loss = exploss ? json_integer_value(exploss) : audiobridge->default_expectedloss;
+			if(expected_loss > 20) {
+				janus_mutex_unlock(&audiobridge->mutex);
+				janus_refcount_decrease(&audiobridge->ref);
+				JANUS_LOG(LOG_ERR, "Invalid element (expected_loss should be a positive integer between 0 and 20)\n");
+				error_code = JANUS_AUDIOBRIDGE_ERROR_INVALID_ELEMENT;
+				g_snprintf(error_cause, 512, "Invalid element (expected_loss should be a positive integer between 0 and 20)");
 				goto error;
 			}
 			janus_audiocodec codec = JANUS_AUDIOCODEC_OPUS;
@@ -5677,6 +6109,7 @@ static void *janus_audiobridge_handler(void *data) {
 			participant->room = audiobridge;
 			participant->user_id = user_id;
 			participant->user_id_str = user_id_str ? g_strdup(user_id_str) : NULL;
+			participant->group = group;
 			g_free(participant->display);
 			participant->admin = admin;
 			participant->display = display_text ? g_strdup(display_text) : NULL;
@@ -5684,6 +6117,8 @@ static void *janus_audiobridge_handler(void *data) {
 			participant->prebuffer_count = prebuffer_count;
 			participant->volume_gain = volume;
 			participant->opus_complexity = complexity;
+			participant->opus_bitrate = opus_bitrate;
+			participant->expected_loss = expected_loss;
 			participant->stereo = audiobridge->spatial_audio;
 			if(participant->stereo) {
 				if(spatial_position > 100)
@@ -5739,8 +6174,11 @@ static void *janus_audiobridge_handler(void *data) {
 					opus_encoder_ctl(participant->encoder, OPUS_SET_MAX_BANDWIDTH(OPUS_BANDWIDTH_WIDEBAND));
 				}
 				opus_encoder_ctl(participant->encoder, OPUS_SET_INBAND_FEC(participant->fec));
+				opus_encoder_ctl(participant->encoder, OPUS_SET_PACKET_LOSS_PERC(participant->expected_loss));
 			}
 			opus_encoder_ctl(participant->encoder, OPUS_SET_COMPLEXITY(participant->opus_complexity));
+			if(participant->opus_bitrate > 0)
+				opus_encoder_ctl(participant->encoder, OPUS_SET_BITRATE(participant->opus_bitrate));
 			if(participant->decoder == NULL) {
 				/* Opus decoder */
 				error = 0;
@@ -5812,17 +6250,20 @@ static void *janus_audiobridge_handler(void *data) {
 			if(rtp != NULL) {
 				const char *ip = json_string_value(json_object_get(rtp, "ip"));
 				uint16_t port = json_integer_value(json_object_get(rtp, "port"));
-				int pt = json_integer_value(json_object_get(rtp, "payload_type"));
-				if(pt == 0)
-					pt = 100;
-				participant->opus_pt = pt;
+				if(participant->codec == JANUS_AUDIOCODEC_OPUS) {
+					int pt = json_integer_value(json_object_get(rtp, "payload_type"));
+					if(pt == 0)
+						pt = 100;
+					participant->opus_pt = pt;
+				}
 				int audiolevel_ext_id = json_integer_value(json_object_get(rtp, "audiolevel_ext"));
 				if(audiolevel_ext_id > 0)
 					participant->extmap_id = audiolevel_ext_id;
 				gboolean fec = json_is_true(json_object_get(rtp, "fec"));
-				if(fec) {
+				if(participant->codec == JANUS_AUDIOCODEC_OPUS && fec) {
 					participant->fec = TRUE;
 					opus_encoder_ctl(participant->encoder, OPUS_SET_INBAND_FEC(participant->fec));
+					opus_encoder_ctl(participant->encoder, OPUS_SET_PACKET_LOSS_PERC(participant->expected_loss));
 				}
 				/* Create the socket */
 				janus_mutex_lock(&participant->pmutex);
@@ -5891,7 +6332,7 @@ static void *janus_audiobridge_handler(void *data) {
 				g_snprintf(tname, sizeof(tname), "rtp %s %s", roomtrunc, parttrunc);
 				janus_refcount_increase(&session->ref);
 				janus_refcount_increase(&participant->ref);
-				participant->plainrtp_media.thread = g_thread_try_new(tname, &janus_audiobridge_plainrtp_relay_thread, session, &error);
+				participant->plainrtp_media.thread = g_thread_try_new(tname, &janus_audiobridge_plainrtp_relay_thread, participant, &error);
 				if(error != NULL) {
 					janus_refcount_decrease(&participant->ref);
 					janus_refcount_decrease(&session->ref);
@@ -5971,6 +6412,10 @@ static void *janus_audiobridge_handler(void *data) {
 				json_t *details = json_object();
 				json_object_set_new(details, "ip", json_string(local_ip));
 				json_object_set_new(details, "port", json_integer(participant->plainrtp_media.local_audio_rtp_port));
+				if(participant->codec == JANUS_AUDIOCODEC_OPUS)
+					json_object_set_new(details, "payload_type", json_integer(participant->opus_pt));
+				else
+					json_object_set_new(details, "payload_type", json_integer(participant->codec == JANUS_AUDIOCODEC_PCMA ? 8 : 0));
 				json_object_set_new(event, "rtp", details);
 			}
 			/* Also notify event handlers */
@@ -6010,12 +6455,15 @@ static void *janus_audiobridge_handler(void *data) {
 				goto error;
 			json_t *muted = json_object_get(root, "muted");
 			json_t *prebuffer = json_object_get(root, "prebuffer");
+			json_t *bitrate = json_object_get(root, "bitrate");
 			json_t *quality = json_object_get(root, "quality");
+			json_t *exploss = json_object_get(root, "expected_loss");
 			json_t *gain = json_object_get(root, "volume");
 			json_t *spatial = json_object_get(root, "spatial_position");
 			json_t *record = json_object_get(root, "record");
 			json_t *recfile = json_object_get(root, "filename");
 			json_t *display = json_object_get(root, "display");
+			json_t *group = json_object_get(root, "group");
 			json_t *gen_offer = json_object_get(root, "generate_offer");
 			json_t *update = json_object_get(root, "update");
 			if(prebuffer) {
@@ -6046,6 +6494,16 @@ static void *janus_audiobridge_handler(void *data) {
 			}
 			if(gain)
 				participant->volume_gain = json_integer_value(gain);
+			if(bitrate) {
+				int32_t opus_bitrate = bitrate ? json_integer_value(bitrate) : 0;
+				if(opus_bitrate < 500 || opus_bitrate > 512000) {
+					JANUS_LOG(LOG_WARN, "Invalid bitrate %"SCNi32", falling back to auto\n", opus_bitrate);
+					opus_bitrate = 0;
+				}
+				participant->opus_bitrate = opus_bitrate;
+				if(participant->encoder)
+					opus_encoder_ctl(participant->encoder, OPUS_SET_BITRATE(participant->opus_bitrate ? participant->opus_bitrate : OPUS_AUTO));
+			}
 			if(quality) {
 				int complexity = json_integer_value(quality);
 				if(complexity < 1 || complexity > 10) {
@@ -6057,6 +6515,29 @@ static void *janus_audiobridge_handler(void *data) {
 				participant->opus_complexity = complexity;
 				if(participant->encoder)
 					opus_encoder_ctl(participant->encoder, OPUS_SET_COMPLEXITY(participant->opus_complexity));
+			}
+			if(exploss) {
+				int expected_loss = json_integer_value(exploss);
+				if(expected_loss > 20) {
+					JANUS_LOG(LOG_ERR, "Invalid element (expected_loss should be a positive integer between 0 and 20)\n");
+					error_code = JANUS_AUDIOBRIDGE_ERROR_INVALID_ELEMENT;
+					g_snprintf(error_cause, 512, "Invalid element (expected_loss should be a positive integer between 0 and 20)");
+					goto error;
+				}
+				participant->expected_loss = expected_loss;
+				if(participant->encoder)
+					opus_encoder_ctl(participant->encoder, OPUS_SET_PACKET_LOSS_PERC(participant->expected_loss));
+			}
+			if(group && participant->room && participant->room->groups != NULL) {
+				const char *group_name = json_string_value(group);
+				uint group_id = GPOINTER_TO_UINT(g_hash_table_lookup(participant->room->groups, group_name));
+				if(group_id == 0) {
+					JANUS_LOG(LOG_ERR, "No such group (%s)\n", group_name);
+					error_code = JANUS_AUDIOBRIDGE_ERROR_NO_SUCH_GROUP;
+					g_snprintf(error_cause, 512, "No such group (%s)", group_name);
+					goto error;
+				}
+				participant->group = group_id;
 			}
 			if(muted || display || (participant->stereo && spatial)) {
 				if(muted) {
@@ -6193,6 +6674,8 @@ static void *janus_audiobridge_handler(void *data) {
 					string_ids ? json_string(participant->user_id_str) : json_integer(participant->user_id));
 				json_object_set_new(info, "display", json_string(participant->display));
 				json_object_set_new(info, "muted", participant->muted ? json_true() : json_false());
+				if(participant->opus_bitrate > 0)
+					json_object_set_new(info, "bitrate", json_integer(participant->opus_bitrate));
 				json_object_set_new(info, "quality", json_integer(participant->opus_complexity));
 				if(participant->stereo)
 					json_object_set_new(info, "spatial_position", json_integer(participant->spatial_position));
@@ -6301,14 +6784,46 @@ static void *janus_audiobridge_handler(void *data) {
 				}
 				admin = TRUE;
 			}
+			/* If this room uses groups, make sure a valid group name was provided */
+			uint group = 0;
+			if(audiobridge->groups != NULL) {
+				JANUS_VALIDATE_JSON_OBJECT(root, group_parameters,
+					error_code, error_cause, TRUE,
+					JANUS_AUDIOBRIDGE_ERROR_MISSING_ELEMENT, JANUS_AUDIOBRIDGE_ERROR_INVALID_ELEMENT);
+				if(error_code != 0) {
+					janus_mutex_unlock(&audiobridge->mutex);
+					janus_refcount_decrease(&audiobridge->ref);
+					goto error;
+				}
+				const char *group_name = json_string_value(json_object_get(root, "group"));
+				group = GPOINTER_TO_UINT(g_hash_table_lookup(audiobridge->groups, group_name));
+				if(group == 0) {
+					janus_mutex_unlock(&audiobridge->mutex);
+					janus_refcount_decrease(&audiobridge->ref);
+					JANUS_LOG(LOG_ERR, "No such group (%s)\n", group_name);
+					error_code = JANUS_AUDIOBRIDGE_ERROR_NO_SUCH_GROUP;
+					g_snprintf(error_cause, 512, "No such group (%s)", group_name);
+					goto error;
+				}
+			}
 			json_t *display = json_object_get(root, "display");
 			const char *display_text = display ? json_string_value(display) : NULL;
 			json_t *muted = json_object_get(root, "muted");
 			json_t *gain = json_object_get(root, "volume");
 			json_t *spatial = json_object_get(root, "spatial_position");
+			json_t *bitrate = json_object_get(root, "bitrate");
 			json_t *quality = json_object_get(root, "quality");
+			json_t *exploss = json_object_get(root, "expected_loss");
 			int volume = gain ? json_integer_value(gain) : 100;
 			int spatial_position = spatial ? json_integer_value(spatial) : 64;
+			int32_t opus_bitrate = audiobridge->default_bitrate;
+			if(bitrate) {
+				opus_bitrate = json_integer_value(bitrate);
+				if(opus_bitrate < 500 || opus_bitrate > 512000) {
+					JANUS_LOG(LOG_WARN, "Invalid bitrate %"SCNi32", falling back to default/auto\n", opus_bitrate);
+					opus_bitrate = audiobridge->default_bitrate;
+				}
+			}
 			int complexity = quality ? json_integer_value(quality) : DEFAULT_COMPLEXITY;
 			if(complexity < 1 || complexity > 10) {
 				janus_mutex_unlock(&audiobridge->mutex);
@@ -6317,6 +6832,16 @@ static void *janus_audiobridge_handler(void *data) {
 				JANUS_LOG(LOG_ERR, "Invalid element (quality should be a positive integer between 1 and 10)\n");
 				error_code = JANUS_AUDIOBRIDGE_ERROR_INVALID_ELEMENT;
 				g_snprintf(error_cause, 512, "Invalid element (quality should be a positive integer between 1 and 10)");
+				goto error;
+			}
+			int expected_loss = exploss ? json_integer_value(exploss) : audiobridge->default_expectedloss;
+			if(expected_loss > 20) {
+				janus_mutex_unlock(&audiobridge->mutex);
+				janus_refcount_decrease(&audiobridge->ref);
+				janus_mutex_unlock(&rooms_mutex);
+				JANUS_LOG(LOG_ERR, "Invalid element (expected_loss should be a positive integer between 0 and 20)\n");
+				error_code = JANUS_AUDIOBRIDGE_ERROR_INVALID_ELEMENT;
+				g_snprintf(error_cause, 512, "Invalid element (expected_loss should be a positive integer between 0 and 20)");
 				goto error;
 			}
 			guint64 user_id = 0;
@@ -6425,7 +6950,6 @@ static void *janus_audiobridge_handler(void *data) {
 					opus_encoder_ctl(new_encoder, OPUS_SET_MAX_BANDWIDTH(OPUS_BANDWIDTH_WIDEBAND));
 				}
 				opus_encoder_ctl(new_encoder, OPUS_SET_INBAND_FEC(participant->fec));
-				opus_encoder_ctl(new_encoder, OPUS_SET_COMPLEXITY(participant->opus_complexity));
 				/* Opus decoder */
 				error = 0;
 				OpusDecoder *new_decoder = opus_decoder_create(audiobridge->sampling_rate,
@@ -6461,6 +6985,8 @@ static void *janus_audiobridge_handler(void *data) {
 					opus_decoder_destroy(participant->decoder);
 				participant->decoder = new_decoder;
 			}
+			if(quality)
+				opus_encoder_ctl(participant->encoder, OPUS_SET_COMPLEXITY(participant->opus_complexity));
 			/* Everything looks fine, start by telling the folks in the old room this participant is going away */
 			event = json_object();
 			json_object_set_new(event, "audiobridge", json_string("event"));
@@ -6502,6 +7028,7 @@ static void *janus_audiobridge_handler(void *data) {
 			participant->user_id = user_id;
 			g_free(participant->user_id_str);
 			participant->user_id_str = user_id_str ? g_strdup(user_id_str) : NULL;
+			participant->group = group;
 			participant->admin = admin;
 			g_free(participant->display);
 			participant->display = display_text ? g_strdup(display_text) : NULL;
@@ -6517,10 +7044,17 @@ static void *janus_audiobridge_handler(void *data) {
 				participant->spatial_position = 0;
 			else if(participant->spatial_position > 100)
 				participant->spatial_position = 100;
+			participant->opus_bitrate = opus_bitrate;
+			if(participant->encoder)
+				opus_encoder_ctl(participant->encoder, OPUS_SET_BITRATE(participant->opus_bitrate ? participant->opus_bitrate : OPUS_AUTO));
 			if(quality) {
 				participant->opus_complexity = complexity;
 				if(participant->encoder)
 					opus_encoder_ctl(participant->encoder, OPUS_SET_COMPLEXITY(participant->opus_complexity));
+			}
+			if(exploss) {
+				participant->expected_loss = expected_loss;
+				opus_encoder_ctl(participant->encoder, OPUS_SET_PACKET_LOSS_PERC(participant->expected_loss));
 			}
 			g_hash_table_insert(audiobridge->participants,
 				string_ids ? (gpointer)g_strdup(participant->user_id_str) : (gpointer)janus_uint64_dup(participant->user_id),
@@ -6923,15 +7457,25 @@ static void janus_audiobridge_rec_add_wav_header(janus_audiobridge_room *audiobr
 	gint64 now = janus_get_real_time();
 	audiobridge->rec_start_time = now;
 	if(audiobridge->record_file) {
-		g_snprintf(filename, 255, "%s%s%s", audiobridge->record_file,
+		g_snprintf(filename, 255, "%s%s%s%s%s",
+			audiobridge->record_dir ? audiobridge->record_dir : "",
+			audiobridge->record_dir ? "/" : "",
+			audiobridge->record_file,
 			rec_tempext ? "." : "", rec_tempext ? rec_tempext : "");
 	} else {
-		g_snprintf(filename, 255, "janus-audioroom-%s-%"SCNi64".wav%s%s", audiobridge->room_id_str,
-			now, rec_tempext ? "." : "", rec_tempext ? rec_tempext : "");
+		g_snprintf(filename, 255, "%s%sjanus-audioroom-%s-%"SCNi64".wav%s%s",
+			audiobridge->record_dir ? audiobridge->record_dir : "",
+			audiobridge->record_dir ? "/" : "",
+			audiobridge->room_id_str, now,
+			rec_tempext ? "." : "", rec_tempext ? rec_tempext : "");
 	}
 	audiobridge->recording = fopen(filename, "wb");
 	if(audiobridge->recording == NULL) {
-		JANUS_LOG(LOG_WARN, "Recording requested, but could NOT open file %s for writing...\n", filename);
+		JANUS_LOG(LOG_WARN, "Recording requested, but could NOT open file %s for writing, giving up...\n", filename);
+		g_atomic_int_set(&audiobridge->record, 0);
+		g_atomic_int_set(&audiobridge->wav_header_added, 0);
+		g_free(audiobridge->record_file);
+		audiobridge->record_file = NULL;
 	} else {
 		JANUS_LOG(LOG_VERB, "Recording requested, opened file %s for writing\n", filename);
 		/* Write WAV header */
@@ -6977,18 +7521,29 @@ static void janus_audiobridge_update_wav_header(janus_audiobridge_room *audiobri
 
 	char filename[255];
 	if(audiobridge->record_file) {
-		g_snprintf(filename, 255, "%s", audiobridge->record_file);
+		g_snprintf(filename, 255, "%s%s%s",
+			audiobridge->record_dir ? audiobridge->record_dir : "",
+			audiobridge->record_dir ? "/" : "",
+			audiobridge->record_file);
 	} else {
-		g_snprintf(filename, 255, "janus-audioroom-%s-%"SCNi64".wav", audiobridge->room_id_str,
-			audiobridge->rec_start_time);
+		g_snprintf(filename, 255, "%s%sjanus-audioroom-%s-%"SCNi64".wav",
+			audiobridge->record_dir ? audiobridge->record_dir : "",
+			audiobridge->record_dir ? "/" : "",
+			audiobridge->room_id_str, audiobridge->rec_start_time);
 	}
 	if(rec_tempext) {
 		/* We need to rename the file, to remove the temporary extension */
 		char extfilename[255];
 		if(audiobridge->record_file) {
-			g_snprintf(extfilename, 255, "%s.%s", audiobridge->record_file, rec_tempext);
+			g_snprintf(extfilename, 255, "%s%s%s.%s",
+				audiobridge->record_dir ? audiobridge->record_dir : "",
+				audiobridge->record_dir ? "/" : "",
+				audiobridge->record_file, rec_tempext);
 		} else {
-			g_snprintf(extfilename, 255, "janus-audioroom-%s-%"SCNi64".wav.%s", audiobridge->room_id_str,
+			g_snprintf(extfilename, 255, "%s%sjanus-audioroom-%s-%"SCNi64".wav.%s",
+				audiobridge->record_dir ? audiobridge->record_dir : "",
+				audiobridge->record_dir ? "/" : "",
+				audiobridge->room_id_str,
 				audiobridge->rec_start_time, rec_tempext);
 		}
 		if(rename(extfilename, filename) != 0) {
@@ -7032,12 +7587,54 @@ static void *janus_audiobridge_mixer_thread(void *data) {
 	memset(outBuffer, 0, OPUS_SAMPLES*(audiobridge->spatial_audio ? 4 : 2));
 	memset(resampled, 0, OPUS_SAMPLES*(audiobridge->spatial_audio ? 4 : 2));
 
-	/* Base RTP packet, in case there are forwarders involved */
-	unsigned char *rtpbuffer = g_malloc0(1500);
-	janus_rtp_header *rtph = (janus_rtp_header *)rtpbuffer;
-	rtph->version = 2;
+	/* In case forwarding groups are enabled, we need additional buffers */
+	uint groups_num = audiobridge->groups ? g_hash_table_size(audiobridge->groups) : 0, index = 0;
+	opus_int32 *groupBuffers = NULL;
+	uint32_t groupBufferSize = 0, groupBuffersSize = 0;
+	OpusEncoder **groupEncoders = NULL;
+	if(groups_num > 0) {
+		/* Create buffers */
+		groupBufferSize = (audiobridge->spatial_audio ? OPUS_SAMPLES*2 : OPUS_SAMPLES) * sizeof(opus_int32);
+		groupBuffersSize = groups_num * groupBufferSize;
+		groupBuffers = g_malloc(groupBuffersSize);
+		groupEncoders = g_malloc(groups_num * sizeof(OpusEncoder *));
+		/* Create separate encoders */
+		for(index=0; index<groups_num; index++) {
+			int error = 0;
+			OpusEncoder *rtp_encoder = opus_encoder_create(audiobridge->sampling_rate,
+				audiobridge->spatial_audio ? 2 : 1, OPUS_APPLICATION_VOIP, &error);
+			if(audiobridge->sampling_rate == 8000) {
+				opus_encoder_ctl(rtp_encoder, OPUS_SET_MAX_BANDWIDTH(OPUS_BANDWIDTH_NARROWBAND));
+			} else if(audiobridge->sampling_rate == 12000) {
+				opus_encoder_ctl(rtp_encoder, OPUS_SET_MAX_BANDWIDTH(OPUS_BANDWIDTH_MEDIUMBAND));
+			} else if(audiobridge->sampling_rate == 16000) {
+				opus_encoder_ctl(rtp_encoder, OPUS_SET_MAX_BANDWIDTH(OPUS_BANDWIDTH_WIDEBAND));
+			} else if(audiobridge->sampling_rate == 24000) {
+				opus_encoder_ctl(rtp_encoder, OPUS_SET_MAX_BANDWIDTH(OPUS_BANDWIDTH_SUPERWIDEBAND));
+			} else if(audiobridge->sampling_rate == 48000) {
+				opus_encoder_ctl(rtp_encoder, OPUS_SET_MAX_BANDWIDTH(OPUS_BANDWIDTH_FULLBAND));
+			} else {
+				JANUS_LOG(LOG_WARN, "Unsupported sampling rate %d, setting 16kHz\n", audiobridge->sampling_rate);
+				opus_encoder_ctl(rtp_encoder, OPUS_SET_MAX_BANDWIDTH(OPUS_BANDWIDTH_WIDEBAND));
+			}
+			/* Check if we need FEC */
+			if(audiobridge->default_expectedloss > 0) {
+				opus_encoder_ctl(rtp_encoder, OPUS_SET_INBAND_FEC(TRUE));
+				opus_encoder_ctl(rtp_encoder, OPUS_SET_PACKET_LOSS_PERC(audiobridge->default_expectedloss));
+			}
+			groupEncoders[index] = rtp_encoder;
+		}
+	}
+
+	/* Base RTP packets, in case there are forwarders involved */
+	gboolean have_opus[JANUS_AUDIOBRIDGE_MAX_GROUPS+1],
+		have_alaw[JANUS_AUDIOBRIDGE_MAX_GROUPS+1],
+		have_ulaw[JANUS_AUDIOBRIDGE_MAX_GROUPS+1];
+	unsigned char *rtpbuffer = g_malloc0(1500 * (groups_num+1));
+	janus_rtp_header *rtph = NULL;
 	/* In case we need G.711 forwarders */
-	uint8_t rtpalaw[12+G711_SAMPLES], rtpulaw[12+G711_SAMPLES];
+	uint8_t *rtpalaw = g_malloc0((12+G711_SAMPLES) * (groups_num+1)),
+			*rtpulaw = g_malloc0((12+G711_SAMPLES) * (groups_num+1));
 
 	/* Timer */
 	struct timeval now, before;
@@ -7127,11 +7724,13 @@ static void *janus_audiobridge_mixer_thread(void *data) {
 		janus_mutex_unlock_nodebug(&audiobridge->mutex);
 		for(i=0; i<samples; i++)
 			buffer[i] = 0;
+		if(groups_num > 0)
+			memset(groupBuffers, 0, groupBuffersSize);
 		ps = participants_list;
 		while(ps) {
 			janus_audiobridge_participant *p = (janus_audiobridge_participant *)ps->data;
 			janus_mutex_lock(&p->qmutex);
-			if(!p->session || !g_atomic_int_get(&p->session->started) || !g_atomic_int_get(&p->active) || p->muted || p->prebuffering || !p->inbuf) {
+			if(g_atomic_int_get(&p->destroyed) || !p->session || !g_atomic_int_get(&p->session->started) || !g_atomic_int_get(&p->active) || p->muted || p->prebuffering || !p->inbuf) {
 				janus_mutex_unlock(&p->qmutex);
 				ps = ps->next;
 				continue;
@@ -7148,48 +7747,98 @@ static void *janus_audiobridge_mixer_thread(void *data) {
 						ps = ps->next;
 						continue;
 					}
-					memcpy((opus_int16 *)pkt->data, resampled, pkt->length);
+					memcpy(pkt->data, resampled, pkt->length*2);
 				}
 				curBuffer = (opus_int16 *)pkt->data;
-				if(!p->stereo) {
-					for(i=0; i<samples; i++) {
-						if(p->volume_gain == 100) {
-							buffer[i] += curBuffer[i];
-						} else {
-							buffer[i] += (curBuffer[i]*p->volume_gain)/100;
+				if(groups_num == 0) {
+					/* Add to the main mix */
+					if(!p->stereo) {
+						for(i=0; i<samples; i++) {
+							if(p->volume_gain == 100) {
+								buffer[i] += curBuffer[i];
+							} else {
+								buffer[i] += (curBuffer[i]*p->volume_gain)/100;
+							}
+						}
+					} else {
+						diff = 50 - p->spatial_position;
+						lgain = 50 + diff;
+						rgain = 50 - diff;
+						for(i=0; i<samples; i++) {
+							if(i%2 == 0) {
+								if(lgain == 100) {
+									if(p->volume_gain == 100) {
+										buffer[i] += curBuffer[i];
+									} else {
+										buffer[i] += (curBuffer[i]*p->volume_gain)/100;
+									}
+								} else {
+									if(p->volume_gain == 100) {
+										buffer[i] += (curBuffer[i]*lgain)/100;
+									} else {
+										buffer[i] += (((curBuffer[i]*lgain)/100)*p->volume_gain)/100;
+									}
+								}
+							} else {
+								if(rgain == 100) {
+									if(p->volume_gain == 100) {
+										buffer[i] += curBuffer[i];
+									} else {
+										buffer[i] += (curBuffer[i]*p->volume_gain)/100;
+									}
+								} else {
+									if(p->volume_gain == 100) {
+										buffer[i] += (curBuffer[i]*rgain)/100;
+									} else {
+										buffer[i] += (((curBuffer[i]*rgain)/100)*p->volume_gain)/100;
+									}
+								}
+							}
 						}
 					}
 				} else {
-					diff = 50 - p->spatial_position;
-					lgain = 50 + diff;
-					rgain = 50 - diff;
-					for(i=0; i<samples; i++) {
-						if(i%2 == 0) {
-							if(lgain == 100) {
-								if(p->volume_gain == 100) {
-									buffer[i] += curBuffer[i];
-								} else {
-									buffer[i] += (curBuffer[i]*p->volume_gain)/100;
-								}
+					/* Add to the group submix */
+					int index = p->group-1;
+					if(!p->stereo) {
+						for(i=0; i<samples; i++) {
+							if(p->volume_gain == 100) {
+								*(groupBuffers + index*samples + i) += curBuffer[i];
 							} else {
-								if(p->volume_gain == 100) {
-									buffer[i] += (curBuffer[i]*lgain)/100;
-								} else {
-									buffer[i] += (((curBuffer[i]*lgain)/100)*p->volume_gain)/100;
-								}
+								*(groupBuffers + index*samples + i) += (curBuffer[i]*p->volume_gain)/100;
 							}
-						} else {
-							if(rgain == 100) {
-								if(p->volume_gain == 100) {
-									buffer[i] += curBuffer[i];
+						}
+					} else {
+						diff = 50 - p->spatial_position;
+						lgain = 50 + diff;
+						rgain = 50 - diff;
+						for(i=0; i<samples; i++) {
+							if(i%2 == 0) {
+								if(lgain == 100) {
+									if(p->volume_gain == 100) {
+										*(groupBuffers + index*samples + i) += curBuffer[i];
+									} else {
+										*(groupBuffers + index*samples + i) += (curBuffer[i]*p->volume_gain)/100;
+									}
 								} else {
-									buffer[i] += (curBuffer[i]*p->volume_gain)/100;
+									if(p->volume_gain == 100) {
+										*(groupBuffers + index*samples + i) += (curBuffer[i]*lgain)/100;
+									} else {
+										*(groupBuffers + index*samples + i) += (((curBuffer[i]*lgain)/100)*p->volume_gain)/100;
+									}
 								}
 							} else {
-								if(p->volume_gain == 100) {
-									buffer[i] += (curBuffer[i]*rgain)/100;
+								if(rgain == 100) {
+									if(p->volume_gain == 100) {
+										*(groupBuffers + index*samples + i) += curBuffer[i];
+									} else {
+										*(groupBuffers + index*samples + i) += (curBuffer[i]*p->volume_gain)/100;
+									}
 								} else {
-									buffer[i] += (((curBuffer[i]*rgain)/100)*p->volume_gain)/100;
+									if(p->volume_gain == 100) {
+										*(groupBuffers + index*samples + i) += (curBuffer[i]*rgain)/100;
+									} else {
+										*(groupBuffers + index*samples + i) += (((curBuffer[i]*rgain)/100)*p->volume_gain)/100;
+									}
 								}
 							}
 						}
@@ -7262,11 +7911,24 @@ static void *janus_audiobridge_mixer_thread(void *data) {
 						gateway->notify_event(&janus_audiobridge_plugin, NULL, info);
 					}
 				}
-				for(i=0; i<samples; i++) {
-					if(p->volume_gain == 100) {
-						buffer[i] += resampled[i];
-					} else {
-						buffer[i] += (resampled[i]*p->volume_gain)/100;
+				if(groups_num == 0) {
+					/* Add to the main mix */
+					for(i=0; i<samples; i++) {
+						if(p->volume_gain == 100) {
+							buffer[i] += resampled[i];
+						} else {
+							buffer[i] += (resampled[i]*p->volume_gain)/100;
+						}
+					}
+				} else {
+					/* Add to the group submix */
+					index = p->group-1;
+					for(i=0; i<samples; i++) {
+						if(p->volume_gain == 100) {
+							*(groupBuffers + index*samples + i) += resampled[i];
+						} else {
+							*(groupBuffers + index*samples + i) += (resampled[i]*p->volume_gain)/100;
+						}
 					}
 				}
 				ps = ps->next;
@@ -7274,6 +7936,14 @@ static void *janus_audiobridge_mixer_thread(void *data) {
 			g_list_free_full(anncs_list, (GDestroyNotify)janus_audiobridge_participant_unref);
 		}
 #endif
+		/* If groups are in use, put them together in the main mix */
+		if(groups_num > 0) {
+			/* Mix all submixes */
+			for(index=0; index<groups_num; index++) {
+				for(i=0; i<samples; i++)
+					buffer[i] += *(groupBuffers + index*samples + i);
+			}
+		}
 		/* Are we recording the mix? (only do it if there's someone in, though...) */
 		if(audiobridge->recording != NULL && g_list_length(participants_list) > 0) {
 			for(i=0; i<samples; i++) {
@@ -7304,7 +7974,7 @@ static void *janus_audiobridge_mixer_thread(void *data) {
 		ps = participants_list;
 		while(ps) {
 			janus_audiobridge_participant *p = (janus_audiobridge_participant *)ps->data;
-			if(!p->session || !g_atomic_int_get(&p->session->started)) {
+			if(g_atomic_int_get(&p->destroyed) || !p->session || !g_atomic_int_get(&p->session->started)) {
 				janus_refcount_decrease(&p->ref);
 				ps = ps->next;
 				continue;
@@ -7317,6 +7987,7 @@ static void *janus_audiobridge_mixer_thread(void *data) {
 				p->inbuf = g_list_delete_link(p->inbuf, first);
 			}
 			janus_mutex_unlock(&p->qmutex);
+			/* Remove the participant's own contribution */
 			curBuffer = (opus_int16 *)((pkt && pkt->length && !pkt->silence) ? pkt->data : NULL);
 			if(!p->stereo) {
 				for(i=0; i<samples; i++) {
@@ -7356,6 +8027,8 @@ static void *janus_audiobridge_mixer_thread(void *data) {
 				i = janus_audiobridge_resample(outBuffer, samples, audiobridge->sampling_rate, (int16_t *)mixedpkt->data, 8000);
 				if(i == 0) {
 					JANUS_LOG(LOG_WARN, "[G.711] Error downsampling from %d, skipping audio packet\n", audiobridge->sampling_rate);
+					g_free(mixedpkt->data);
+					g_free(mixedpkt);
 					janus_refcount_decrease(&p->ref);
 					ps = ps->next;
 					continue;
@@ -7400,55 +8073,89 @@ static void *janus_audiobridge_mixer_thread(void *data) {
 				go_on = TRUE;
 			}
 			if(go_on) {
-				/* Send the mixed frame to everybody */
-				for(i=0; i<samples; i++)
-					outBuffer[i] = buffer[i];
+				/* By default, let's send the mixed frame to everybody */
+				if(groups_num == 0) {
+					for(i=0; i<samples; i++)
+						outBuffer[i] = buffer[i];
+					have_opus[0] = FALSE;
+					have_alaw[0] = FALSE;
+					have_ulaw[0] = FALSE;
+				} else {
+					for(index=0; index <= groups_num; index++) {
+						have_opus[index] = FALSE;
+						have_alaw[index] = FALSE;
+						have_ulaw[index] = FALSE;
+					}
+				}
 				GHashTableIter iter;
 				gpointer key, value;
 				g_hash_table_iter_init(&iter, audiobridge->rtp_forwarders);
 				opus_int32 length = 0;
-				gboolean have_opus = FALSE, have_alaw = FALSE, have_ulaw = FALSE;
 				while(audiobridge->rtp_udp_sock > 0 && g_hash_table_iter_next(&iter, &key, &value)) {
 					guint32 stream_id = GPOINTER_TO_UINT(key);
 					janus_audiobridge_rtp_forwarder *forwarder = (janus_audiobridge_rtp_forwarder *)value;
 					if(count == 0 && pf_count == 0 && !forwarder->always_on)
 						continue;
-					if(forwarder->codec == JANUS_AUDIOCODEC_OPUS && !have_opus) {
-						/* This is an Opus forwarder and we don't have a version for that yet */
-						length = opus_encode(audiobridge->rtp_encoder, outBuffer,
-							audiobridge->spatial_audio ? samples/2 : samples, rtpbuffer+12, 1500-12);
-						if(length < 0) {
-							JANUS_LOG(LOG_ERR, "[Opus] Ops! got an error encoding the Opus frame: %d (%s)\n", length, opus_strerror(length));
-							continue;
+					/* Check if we're forwarding the main mix or a specific group */
+					if(groups_num > 0) {
+						if(forwarder->group == 0) {
+							/* We're forwarding the main mix */
+							for(i=0; i<samples; i++)
+								outBuffer[i] = buffer[i];
+						} else {
+							/* We're forwarding a group mix */
+							index = forwarder->group-1;
+							for(i=0; i<samples; i++)
+								outBuffer[i] = *(groupBuffers + index*samples + i);
 						}
-						have_opus = TRUE;
-						rtph = (janus_rtp_header *)rtpbuffer;
-					} else if((forwarder->codec == JANUS_AUDIOCODEC_PCMA && !have_alaw) ||
-							(forwarder->codec == JANUS_AUDIOCODEC_PCMU && !have_ulaw)) {
-						/* This is a G.711 forwarder and we don't have a version for that yet */
-						if(audiobridge->sampling_rate != 8000) {
-							/* Downsample this from whatever the mixer uses */
-							i = janus_audiobridge_resample(outBuffer, samples, audiobridge->sampling_rate, resampled, 8000);
-							if(i == 0) {
-								JANUS_LOG(LOG_WARN, "[G.711] Error downsampling from %d, skipping audio packet\n", audiobridge->sampling_rate);
+					}
+					if(forwarder->codec == JANUS_AUDIOCODEC_OPUS) {
+						/* This is an Opus forwarder, check if we have a version for that already */
+						if(!have_opus[forwarder->group]) {
+							/* We don't, encode now */
+							OpusEncoder *rtp_encoder = (forwarder->group == 0 ? audiobridge->rtp_encoder : groupEncoders[forwarder->group-1]);
+							length = opus_encode(rtp_encoder, outBuffer,
+								audiobridge->spatial_audio ? samples/2 : samples,
+								rtpbuffer + forwarder->group*1500 + 12, 1500-12);
+							if(length < 0) {
+								JANUS_LOG(LOG_ERR, "[Opus] Ops! got an error encoding the Opus frame: %d (%s)\n", length, opus_strerror(length));
 								continue;
 							}
-						} else {
-							/* Just copy */
-							memcpy(resampled, outBuffer, samples*2);
+							have_opus[forwarder->group] = TRUE;
 						}
-						int i = 0;
-						if(forwarder->codec == JANUS_AUDIOCODEC_PCMA) {
-							for(i=0; i<160; i++)
-								rtpalaw[12+i] = janus_audiobridge_g711_alaw_encode(resampled[i]);
-							have_alaw = TRUE;
-							rtph = (janus_rtp_header *)rtpalaw;
-						} else {
-							for(i=0; i<160; i++)
-								rtpulaw[12+i] = janus_audiobridge_g711_ulaw_encode(resampled[i]);
-							have_ulaw = TRUE;
-							rtph = (janus_rtp_header *)rtpulaw;
+						rtph = (janus_rtp_header *)(rtpbuffer + forwarder->group*1500);
+						rtph->version = 2;
+					} else if(forwarder->codec == JANUS_AUDIOCODEC_PCMA || forwarder->codec == JANUS_AUDIOCODEC_PCMU) {
+						/* This is a G.711 forwarder, check if we have a version for that already */
+						if((forwarder->codec == JANUS_AUDIOCODEC_PCMA && !have_alaw[forwarder->group]) ||
+								(forwarder->codec == JANUS_AUDIOCODEC_PCMU && !have_ulaw[forwarder->group])) {
+							/* We don't, encode now */
+							if(audiobridge->sampling_rate != 8000) {
+								/* Downsample this from whatever the mixer uses */
+								i = janus_audiobridge_resample(outBuffer, samples, audiobridge->sampling_rate, resampled, 8000);
+								if(i == 0) {
+									JANUS_LOG(LOG_WARN, "[G.711] Error downsampling from %d, skipping audio packet\n", audiobridge->sampling_rate);
+									continue;
+								}
+							} else {
+								/* Just copy */
+								memcpy(resampled, outBuffer, samples*2);
+							}
+							int i = 0;
+							if(forwarder->codec == JANUS_AUDIOCODEC_PCMA) {
+								uint8_t *rtpalaw_buffer = rtpalaw + forwarder->group*G711_SAMPLES + 12;
+								for(i=0; i<160; i++)
+									rtpalaw_buffer[i] = janus_audiobridge_g711_alaw_encode(resampled[i]);
+								have_alaw[forwarder->group] = TRUE;
+							} else {
+								uint8_t *rtpulaw_buffer = rtpulaw + forwarder->group*G711_SAMPLES + 12;
+								for(i=0; i<160; i++)
+									rtpulaw_buffer[i] = janus_audiobridge_g711_ulaw_encode(resampled[i]);
+								have_ulaw[forwarder->group] = TRUE;
+							}
 						}
+						rtph = (janus_rtp_header *)(forwarder->codec == JANUS_AUDIOCODEC_PCMA ?
+							(rtpalaw + forwarder->group*G711_SAMPLES + 12) : (rtpulaw + forwarder->group*G711_SAMPLES + 12));
 						rtph->version = 2;
 						length = 160;
 					}
@@ -7496,6 +8203,16 @@ static void *janus_audiobridge_mixer_thread(void *data) {
 		janus_audiobridge_update_wav_header(audiobridge);
 	}
 	g_free(rtpbuffer);
+	g_free(rtpalaw);
+	g_free(rtpulaw);
+	g_free(groupBuffers);
+	if(groupEncoders) {
+		for(index=0; index<groups_num; index++) {
+			if(groupEncoders[index])
+				opus_encoder_destroy(groupEncoders[index]);
+		}
+		g_free(groupEncoders);
+	}
 	JANUS_LOG(LOG_VERB, "Leaving mixer thread for room %s (%s)...\n", audiobridge->room_id_str, audiobridge->room_name);
 
 	janus_refcount_decrease(&audiobridge->ref);
@@ -7715,14 +8432,14 @@ static int janus_audiobridge_plainrtp_allocate_port(janus_audiobridge_plainrtp_m
 }
 /* Thread to relay RTP/RTCP frames coming from the peer */
 static void *janus_audiobridge_plainrtp_relay_thread(void *data) {
-	janus_audiobridge_session *session = (janus_audiobridge_session *)data;
-	JANUS_LOG(LOG_INFO, "[AudioBridge-%p] Starting Plain RTP participant thread\n", session);
-	if(!session || !session->participant) {
-		JANUS_LOG(LOG_WARN, "[AudioBridge-%p] Invalid session or participant..?\n", session);
+	janus_audiobridge_participant *participant = (janus_audiobridge_participant *)data;
+	if(!participant) {
+		JANUS_LOG(LOG_ERR, "Invalid participant!\n");
 		g_thread_unref(g_thread_self());
 		return NULL;
 	}
-	janus_audiobridge_participant *participant = (janus_audiobridge_participant *)session->participant;
+	janus_audiobridge_session *session = participant->session;
+	JANUS_LOG(LOG_INFO, "[AudioBridge-%p] Starting Plain RTP participant thread\n", session);
 
 	/* File descriptors */
 	socklen_t addrlen;

@@ -25,6 +25,7 @@
 #include "../debug.h"
 #include "../version.h"
 
+static gboolean multichannel_opus = FALSE;
 static AVFormatContext *fctx;
 static AVStream *vStream;
 
@@ -32,6 +33,14 @@ static const uint8_t opus_extradata[19] = {
 	'O', 'p', 'u', 's', 'H', 'e', 'a', 'd',
 	1, 2, 0, 0, 128, 187,
 	0, 0, 0, 0, 0,
+};
+static const uint8_t multiopus_extradata[27] = {
+	'O', 'p', 'u', 's', 'H', 'e', 'a', 'd',
+	1, 6, 0, 0, 128, 187,
+	0, 0, 0, 0, 1,
+	/* FIXME The following is the mapping of the streams: we should
+	 * check what was negotiated in the SDP, but for now we hardcode it */
+	4, 2, 0, 4, 1, 2, 3, 5
 };
 
 /* Supported target formats */
@@ -43,7 +52,7 @@ const char **janus_pp_opus_get_extensions(void) {
 }
 
 /* Processing methods */
-int janus_pp_opus_create(char *destination, char *metadata, const char *extension) {
+int janus_pp_opus_create(char *destination, char *metadata, gboolean multiopus, const char *extension) {
 	if(destination == NULL)
 		return -1;
 
@@ -61,7 +70,14 @@ int janus_pp_opus_create(char *destination, char *metadata, const char *extensio
 		return -1;
 	}
 
-	vStream = janus_pp_new_audio_avstream(fctx, AV_CODEC_ID_OPUS, 48000, 2, opus_extradata, sizeof(opus_extradata));
+	multichannel_opus = multiopus;
+	if(!multichannel_opus) {
+		/* Regular Opus stream */
+		vStream = janus_pp_new_audio_avstream(fctx, AV_CODEC_ID_OPUS, 48000, 2, opus_extradata, sizeof(opus_extradata));
+	} else {
+		/* Multichannel Opus Stream*/
+		vStream = janus_pp_new_audio_avstream(fctx, AV_CODEC_ID_OPUS, 48000, 6, multiopus_extradata, sizeof(multiopus_extradata));
+	}
 	if(vStream == NULL) {
 		JANUS_LOG(LOG_ERR, "Error adding stream\n");
 		return -1;
@@ -85,7 +101,11 @@ int janus_pp_opus_process(FILE *file, janus_pp_frame_packet *list, int *working)
 	int bytes = 0, len = 0, steps = 0, last_seq = 0;
 	uint64_t pos = 0, nextPos = 0;
 	uint8_t *buffer = g_malloc0(1500);
+#ifdef FF_API_INIT_PACKET
 	AVPacket *pkt = av_packet_alloc();
+#else
+	AVPacket apkt = { 0 }, *pkt = &apkt;
+#endif
 	AVRational timebase = {1, 48000};
 
 	while(*working && tmp != NULL) {
@@ -106,7 +126,9 @@ int janus_pp_opus_process(FILE *file, janus_pp_frame_packet *list, int *working)
 					JANUS_LOG(LOG_WARN, "[SKIP] pos: %06" SCNu64 ", skipping remaining silence\n", pos / 48 / 20 + 1);
 					break;
 				}
+#ifdef FF_API_INIT_PACKET
 				av_packet_unref(pkt);
+#endif
 				pkt->stream_index = 0;
 				pkt->data = opus_silence;
 				pkt->size = sizeof(opus_silence);
@@ -151,7 +173,11 @@ int janus_pp_opus_process(FILE *file, janus_pp_frame_packet *list, int *working)
 		}
 		JANUS_LOG(LOG_VERB, "pos: %06"SCNu64", writing %d bytes out of %d (seq=%"SCNu16", step=%"SCNu16", ts=%"SCNu64", time=%"SCNu64"s)\n",
 			pos, bytes, tmp->len, tmp->seq, diff, tmp->ts, (tmp->ts-list->ts)/48000);
+#ifdef FF_API_INIT_PACKET
 		av_packet_unref(pkt);
+#else
+		av_init_packet(pkt);
+#endif
 		pkt->stream_index = 0;
 		pkt->data = buffer;
 		pkt->size = bytes;
@@ -165,7 +191,9 @@ int janus_pp_opus_process(FILE *file, janus_pp_frame_packet *list, int *working)
 		tmp = tmp->next;
 	}
 	g_free(buffer);
+#ifdef FF_API_INIT_PACKET
 	av_packet_free(&pkt);
+#endif
 	return 0;
 }
 
