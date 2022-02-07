@@ -8157,6 +8157,12 @@ static void *janus_audiobridge_mixer_thread(void *data) {
 						rtph = (janus_rtp_header *)(forwarder->codec == JANUS_AUDIOCODEC_PCMA ?
 							(rtpalaw + forwarder->group*G711_SAMPLES + 12) : (rtpulaw + forwarder->group*G711_SAMPLES + 12));
 						rtph->version = 2;
+ 						//fix bug with incorrect header in pcma RTP forwarding in audiobridge
+ 						rtph->extension = 0;
+ 						rtph->csrccount = 0;
+ 						rtph->markerbit = 0;
+ 						rtph->padding = 0;
+
 						length = 160;
 					}
 					/* Update header */
