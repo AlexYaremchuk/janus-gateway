@@ -7872,7 +7872,7 @@ static void *janus_streaming_relay_thread(void *data) {
 						continue;
 					}
                                         if (a_last_ssrc && ssrc == a_last_ssrc && (now - source->last_received_audio)>(gint64)1000*500){
-                                                JANUS_LOG(LOG_INFO, "[%s] RTP paused more than 500ms. Assuming it's a new stream. Swith ssrc for one packet to prevent srtp_err_status_replay_old error. \n", name);
+                                                JANUS_LOG(LOG_INFO, "[%s] RTP ssrc=%"SCNu32" paused more than 500ms. Assuming it's a new stream. Swith ssrc for one packet to prevent srtp_err_status_replay_old error. \n", name, ssrc);
                                                 ssrc = ssrc + 1;
                                         }
 					source->last_received_audio = now;
