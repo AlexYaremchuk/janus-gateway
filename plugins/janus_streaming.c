@@ -1078,6 +1078,8 @@ typedef struct janus_streaming_rtp_source {
 	uint32_t lowest_bitrate;	/* Lowest bitrate received by viewers via REMB since last update */
 	gint64 remb_latest;			/* Time of latest sent REMB (to avoid flooding) */
 	struct sockaddr_storage audio_rtcp_addr, video_rtcp_addr;
+	gint forward_port;
+	struct sockaddr_in forward_rtp_addr; //address to forward to
 #ifdef HAVE_LIBCURL
 	gboolean rtsp;
 	CURL *curl;
@@ -1158,6 +1160,9 @@ typedef struct janus_streaming_mountpoint {
 	volatile gint destroyed;
 	janus_mutex mutex;
 	janus_refcount ref;
+	volatile gint do_forwarding;
+	volatile uint32_t forward_ssrc; //ssrc value to forward to
+	
 } janus_streaming_mountpoint;
 GHashTable *mountpoints = NULL, *mountpoints_temp = NULL;
 janus_mutex mountpoints_mutex = JANUS_MUTEX_INITIALIZER;
@@ -1959,6 +1964,45 @@ int janus_streaming_init(janus_callbacks *callback, const char *config_path) {
 					cl = cl->next;
 					continue;
 				}
+
+				JANUS_LOG(LOG_INFO, "Configuring forwarding \n");
+
+				// rtp forward read config to forward to
+				janus_config_item *ssrcforwardip = janus_config_get(config, cat, janus_config_type_item, "ssrcforwardip");
+				janus_config_item *ssrcforwardport = janus_config_get(config, cat, janus_config_type_item, "ssrcforwardport");
+
+				uint16_t forwarding_port = audio_port + 1;
+				char* forwarding_ip = 0;
+
+				if (ssrcforwardip && ssrcforwardip->value)
+				{
+					forwarding_ip = ssrcforwardip->value;
+				}else{
+					JANUS_LOG(LOG_INFO, "No forwarding IP \n");
+				}
+
+				if (ssrcforwardport && ssrcforwardport->value)
+				{
+					janus_string_to_uint16(ssrcforwardport->value, &forwarding_port);
+				}	
+
+				if (forwarding_ip)
+				{
+					JANUS_LOG(LOG_INFO, "Setting forwarding info \n");
+					janus_streaming_rtp_source *source = mp->source;
+					source->forward_rtp_addr.sin_family = AF_INET;
+					source->forward_rtp_addr.sin_port = htons(forwarding_port);
+					inet_pton(AF_INET, forwarding_ip, &(source->forward_rtp_addr.sin_addr));
+					JANUS_LOG(LOG_INFO, "Streaming plugin forwarding RTP to '%s'...\n", forwarding_ip);
+				}				
+				//todo set ssrc to 0
+				//temp code
+				mp->forward_ssrc = 54321;
+				mp->do_forwarding = 1;				
+				
+				
+
+
 				mp->is_private = is_private;
 				if(secret && secret->value)
 					mp->secret = g_strdup(secret->value);
@@ -3468,6 +3512,36 @@ static json_t *janus_streaming_process_synchronous_request(janus_streaming_sessi
 			gateway->notify_event(&janus_streaming_plugin, session ? session->handle : NULL, info);
 		}
 		goto prepare_response;
+	} else if(!strcasecmp(request_text, "forward")) {
+		//todo add forwarding
+		JANUS_LOG(LOG_VERB, "Attempt to forward RTP with ssrc\n");
+		json_t *id = json_object_get(root, "id");	
+		guint64 id_value = 0;
+		char id_num[30], *id_value_str = NULL;
+		if(!string_ids) {
+			id_value = json_integer_value(id);
+			g_snprintf(id_num, sizeof(id_num), "%"SCNu64, id_value);
+			id_value_str = id_num;
+		} else {
+			id_value_str = (char *)json_string_value(id);
+		}
+
+		janus_mutex_lock(&mountpoints_mutex);
+		janus_streaming_mountpoint *mp = g_hash_table_lookup(mountpoints,
+			string_ids ? (gpointer)id_value_str : (gpointer)&id_value);
+		if(mp == NULL) {
+			janus_mutex_unlock(&mountpoints_mutex);
+			JANUS_LOG(LOG_ERR, "No such mountpoint (%s)\n", id_value_str);
+			error_code = JANUS_STREAMING_ERROR_NO_SUCH_MOUNTPOINT;
+			g_snprintf(error_cause, 512, "No such mountpoint (%s)", id_value_str);
+			goto prepare_response;
+		}
+
+		mp->do_forwarding = 1;
+
+		janus_mutex_unlock(&mountpoints_mutex);
+
+		
 	} else if(!strcasecmp(request_text, "edit")) {
 		JANUS_LOG(LOG_VERB, "Attempt to edit an existing streaming mountpoint\n");
 		JANUS_VALIDATE_JSON_OBJECT(root, edit_parameters,
@@ -5678,6 +5752,7 @@ static void janus_streaming_rtp_source_free(janus_streaming_rtp_source *source) 
 	if(source->audio_rtcp_fd > -1) {
 		close(source->audio_rtcp_fd);
 	}
+
 	if(source->video_rtcp_fd > -1) {
 		close(source->video_rtcp_fd);
 	}
@@ -7868,15 +7943,34 @@ static void *janus_streaming_relay_thread(void *data) {
 					}
 					janus_rtp_header *rtp = (janus_rtp_header *)buffer;
 					ssrc = ntohl(rtp->ssrc);
+					
 					if(source->rtp_collision > 0 && a_last_ssrc && ssrc != a_last_ssrc &&
 							(now-source->last_received_audio) < (gint64)1000*source->rtp_collision) {
 						JANUS_LOG(LOG_WARN, "[%s] RTP collision on audio mountpoint, dropping packet (ssrc=%"SCNu32")\n", name, ssrc);
 						continue;
 					}
-                                        if (a_last_ssrc && ssrc == a_last_ssrc && (now - source->last_received_audio)>(gint64)1000*500){
-                                                JANUS_LOG(LOG_INFO, "[%s] RTP ssrc=%"SCNu32" paused more than 500ms. Assuming it's a new stream. Swith ssrc for one packet to prevent srtp_err_status_replay_old error. \n", name, ssrc);
-                                                ssrc = ssrc + 1;
-                                        }
+
+					//todo: add rtp forwarding here and continue
+					if (ssrc==mountpoint->forward_ssrc)
+					{						
+
+						JANUS_LOG(LOG_INFO, "[%s] RTP ssrc=%"SCNu32" forwarded \n", name, ssrc);
+
+
+						addrlen = sizeof(source->forward_rtp_addr);
+						if(sendto(audio_fd, buffer, bytes, 0, (struct sockaddr *)&source->forward_rtp_addr, addrlen) < 0) {
+							JANUS_LOG(LOG_HUGE, "Error forwarding RTP packet for room %s... %s (len=%d)...\n",
+							source->audio_host, g_strerror(errno), bytes);
+						}
+
+						continue;
+					}
+
+                    //rchanges fix: same ssrc after delay on one IP happend. hack - change ssrc for a short period
+					if (a_last_ssrc && ssrc == a_last_ssrc && (now - source->last_received_audio)>(gint64)1000*500){
+                        JANUS_LOG(LOG_INFO, "[%s] RTP ssrc=%"SCNu32" paused more than 500ms. Assuming it's a new stream. Swith ssrc for one packet to prevent srtp_err_status_replay_old error. \n", name, ssrc);
+                        ssrc = ssrc + 1;
+                    }
 					source->last_received_audio = now;
 					//~ JANUS_LOG(LOG_VERB, "************************\nGot %d bytes on the audio channel...\n", bytes);
 					/* Do we have a new stream? */
