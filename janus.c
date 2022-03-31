@@ -4426,7 +4426,7 @@ gint main(int argc, char *argv[])
 	janus_log_set_loggers(loggers);
 
 	JANUS_PRINT("---------------------------------------------------\n");
-	JANUS_PRINT("  Starting Meetecho Janus (WebRTC Server) v%s\n", janus_version_string);
+	JANUS_PRINT("  Starting Meetecho Janus RCom (WebRTC Server) v%s\n", janus_version_string);
 	JANUS_PRINT("---------------------------------------------------\n\n");
 
 	/* Handle SIGINT (CTRL-C), SIGTERM (from service managers) */
