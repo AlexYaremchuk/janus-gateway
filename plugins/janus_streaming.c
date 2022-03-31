@@ -358,6 +358,7 @@ rtsp_conn_timeout = connection timeout for cURL (CURLOPT_CONNECTTIMEOUT) call ga
 	"new_secret" : "<new secret for the mountpoint; optional>",
 	"new_pin" : "<new PIN for the mountpoint; optional>",
 	"new_is_private" : <true|false, depending on whether the mountpoint should be now listable; optional>,
+	"new_forwarding_ssrc" : "ssrc for the forwarding",
 	"permanent" : <true|false, whether the mountpoint should be saved to configuration file or not; false by default>
 }
 \endverbatim
@@ -828,6 +829,8 @@ static struct janus_json_parameter edit_parameters[] = {
 	{"new_description", JSON_STRING, 0},
 	{"new_secret", JSON_STRING, 0},
 	{"new_pin", JSON_STRING, 0},
+//	{"new_forwarding_ssrc", JSON_STRING, 0}, todo - string object for multiple values
+	{"new_forwarding_ssrc", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
 	{"new_is_private", JANUS_JSON_BOOL, 0},
 	{"permanent", JANUS_JSON_BOOL, 0}
 };
@@ -1161,7 +1164,7 @@ typedef struct janus_streaming_mountpoint {
 	janus_mutex mutex;
 	janus_refcount ref;
 	volatile gint do_forwarding;
-	volatile uint32_t forward_ssrc; //ssrc value to forward to
+	volatile uint32_t forward_ssrc; //ssrc value to forward to. todo: add multiple ssrc's
 	
 } janus_streaming_mountpoint;
 GHashTable *mountpoints = NULL, *mountpoints_temp = NULL;
@@ -3568,6 +3571,7 @@ static json_t *janus_streaming_process_synchronous_request(janus_streaming_sessi
 		json_t *pin = json_object_get(root, "new_pin");
 		json_t *is_private = json_object_get(root, "new_is_private");
 		json_t *permanent = json_object_get(root, "permanent");
+		json_t *ssrc = json_object_get(root, "new_forwarding_ssrc");
 		gboolean save = permanent ? json_is_true(permanent) : FALSE;
 		if(save && config == NULL) {
 			JANUS_LOG(LOG_ERR, "No configuration file, can't edit mountpoint permanently\n");
@@ -3640,6 +3644,16 @@ static json_t *janus_streaming_process_synchronous_request(janus_streaming_sessi
 			char *new_pin = g_strdup(json_string_value(pin));
 			mp->pin = new_pin;
 			g_free(old_pin);
+		}	
+		
+		if(ssrc ) {
+			guint32 ssrc_value = json_integer_value(ssrc);
+			mp->forward_ssrc = ssrc_value;
+			mp->do_forwarding = 1;
+			JANUS_LOG(LOG_INFO, "Setting ssrc to forward:  %"SCNu32" \n", ssrc_value);
+		}else{
+			mp->do_forwarding=0;
+			mp->forward_ssrc=0;
 		}
 		if(save) {
 			JANUS_LOG(LOG_VERB, "Saving edited mountpoint %s permanently in config file\n", mp->id_str);
@@ -7951,11 +7965,9 @@ static void *janus_streaming_relay_thread(void *data) {
 					}
 
 					//todo: add rtp forwarding here and continue
-					if (ssrc==mountpoint->forward_ssrc)
-					{						
-
-						JANUS_LOG(LOG_INFO, "[%s] RTP ssrc=%"SCNu32" forwarded \n", name, ssrc);
-
+					if ( (mountpoint->do_forwarding) && (ssrc==mountpoint->forward_ssrc))
+					{
+						JANUS_LOG(LOG_DBG, "[%s] RTP ssrc=%"SCNu32" forwarded \n", name, ssrc);
 
 						addrlen = sizeof(source->forward_rtp_addr);
 						if(sendto(audio_fd, buffer, bytes, 0, (struct sockaddr *)&source->forward_rtp_addr, addrlen) < 0) {
@@ -7968,7 +7980,7 @@ static void *janus_streaming_relay_thread(void *data) {
 
                     //rchanges fix: same ssrc after delay on one IP happend. hack - change ssrc for a short period
 					if (a_last_ssrc && ssrc == a_last_ssrc && (now - source->last_received_audio)>(gint64)1000*500){
-                        JANUS_LOG(LOG_INFO, "[%s] RTP ssrc=%"SCNu32" paused more than 500ms. Assuming it's a new stream. Swith ssrc for one packet to prevent srtp_err_status_replay_old error. \n", name, ssrc);
+                        JANUS_LOG(LOG_HUGE, "[%s] RTP ssrc=%"SCNu32" paused more than 500ms. Assuming it's a new stream. Swith ssrc for one packet to prevent srtp_err_status_replay_old error. \n", name, ssrc);
                         ssrc = ssrc + 1;
                     }
 					source->last_received_audio = now;
