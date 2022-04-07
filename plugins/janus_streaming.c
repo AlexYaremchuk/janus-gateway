@@ -359,6 +359,7 @@ rtsp_conn_timeout = connection timeout for cURL (CURLOPT_CONNECTTIMEOUT) call ga
 	"new_pin" : "<new PIN for the mountpoint; optional>",
 	"new_is_private" : <true|false, depending on whether the mountpoint should be now listable; optional>,
 	"new_forwarding_ssrc" : "ssrc for the forwarding",
+	"new_forwarding_ssrc_list" : " list of ssrc for the forwarding (comma separated json array)",
 	"permanent" : <true|false, whether the mountpoint should be saved to configuration file or not; false by default>
 }
 \endverbatim
@@ -829,7 +830,7 @@ static struct janus_json_parameter edit_parameters[] = {
 	{"new_description", JSON_STRING, 0},
 	{"new_secret", JSON_STRING, 0},
 	{"new_pin", JSON_STRING, 0},
-//	{"new_forwarding_ssrc", JSON_STRING, 0}, todo - string object for multiple values
+	{"new_forwarding_ssrc_list", JSON_ARRAY, 0},
 	{"new_forwarding_ssrc", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
 	{"new_is_private", JANUS_JSON_BOOL, 0},
 	{"permanent", JANUS_JSON_BOOL, 0}
@@ -1139,6 +1140,8 @@ typedef struct janus_streaming_codecs {
 	char *video_fmtp;
 } janus_streaming_codecs;
 
+#define MAX_FORWARD_SSRC_NUM 5
+
 typedef struct janus_streaming_mountpoint {
 	guint64 id;			/* Unique mountpoint ID (when using integers) */
 	gchar *id_str;		/* Unique mountpoint ID (when using strings) */
@@ -1165,6 +1168,9 @@ typedef struct janus_streaming_mountpoint {
 	janus_refcount ref;
 	volatile gint do_forwarding;
 	volatile uint32_t forward_ssrc; //ssrc value to forward to. todo: add multiple ssrc's
+	volatile uint32_t forward_ssrc_list[MAX_FORWARD_SSRC_NUM]; //ssrc values to forward to
+	volatile gint forward_ssrc_list_len; //number of ssrc values to forward to
+
 	
 } janus_streaming_mountpoint;
 GHashTable *mountpoints = NULL, *mountpoints_temp = NULL;
@@ -1996,15 +2002,12 @@ int janus_streaming_init(janus_callbacks *callback, const char *config_path) {
 					source->forward_rtp_addr.sin_family = AF_INET;
 					source->forward_rtp_addr.sin_port = htons(forwarding_port);
 					inet_pton(AF_INET, forwarding_ip, &(source->forward_rtp_addr.sin_addr));
-					JANUS_LOG(LOG_INFO, "Streaming plugin forwarding RTP to '%s'...\n", forwarding_ip);
+					JANUS_LOG(LOG_INFO, "Streaming plugin forwarding RTP to '%s:%d'...\n", forwarding_ip, forwarding_port);
 				}				
-				//todo set ssrc to 0
-				//temp code
-				mp->forward_ssrc = 54321;
-				mp->do_forwarding = 1;				
-				
-				
 
+				// no rtp forwarding by default				
+				mp->do_forwarding = 0;
+				mp->forward_ssrc_list_len=0;
 
 				mp->is_private = is_private;
 				if(secret && secret->value)
@@ -3571,7 +3574,8 @@ static json_t *janus_streaming_process_synchronous_request(janus_streaming_sessi
 		json_t *pin = json_object_get(root, "new_pin");
 		json_t *is_private = json_object_get(root, "new_is_private");
 		json_t *permanent = json_object_get(root, "permanent");
-		json_t *ssrc = json_object_get(root, "new_forwarding_ssrc");
+		json_t *ssrc = json_object_get(root, "new_forwarding_ssrc");//get ssrc single value
+		json_t *ssrc_list = json_object_get(root, "new_forwarding_ssrc_list");//get ssrc list
 		gboolean save = permanent ? json_is_true(permanent) : FALSE;
 		if(save && config == NULL) {
 			JANUS_LOG(LOG_ERR, "No configuration file, can't edit mountpoint permanently\n");
@@ -3646,15 +3650,39 @@ static json_t *janus_streaming_process_synchronous_request(janus_streaming_sessi
 			g_free(old_pin);
 		}	
 		
+		mp->do_forwarding=0; //don't forward by default for this mountpoint and only enable if ssrc is provided
+		mp->forward_ssrc_list_len=0; //no ssrcs to forward by default
+
 		if(ssrc ) {
 			guint32 ssrc_value = json_integer_value(ssrc);
 			mp->forward_ssrc = ssrc_value;
 			mp->do_forwarding = 1;
-			JANUS_LOG(LOG_INFO, "Setting ssrc to forward:  %"SCNu32" \n", ssrc_value);
-		}else{
-			mp->do_forwarding=0;
-			mp->forward_ssrc=0;
+			JANUS_LOG(LOG_INFO, "Setting single ssrc to forward:  %"SCNu32" \n", ssrc_value);
 		}
+		
+		if (ssrc_list){
+			JANUS_LOG(LOG_INFO, "Setting ssrc list to forward: \n");
+			if (json_array_size(ssrc_list)>0){
+				mp->do_forwarding=1;
+				
+				for (int i=0; i<json_array_size(ssrc_list); i++){					
+					
+					json_t *ssrc_value = json_array_get(ssrc_list, i);
+					guint32 ssrc_value_int = json_integer_value(ssrc_value);			
+
+					if (i>=MAX_FORWARD_SSRC_NUM){
+						JANUS_LOG(LOG_WARN, "Too many ssrcs to forward, only %d ssrcs will be forwarded. Ssrc =  %"SCNu32" will be ignored \n", MAX_FORWARD_SSRC_NUM, ssrc_value_int);
+						continue;
+					}					
+										
+					mp->forward_ssrc_list[ mp->forward_ssrc_list_len ]=ssrc_value_int;
+					mp->forward_ssrc_list_len++;
+					JANUS_LOG(LOG_INFO, "ssrc =  %"SCNu32" \n", ssrc_value_int);
+				}
+			}
+
+		}	
+		
 		if(save) {
 			JANUS_LOG(LOG_VERB, "Saving edited mountpoint %s permanently in config file\n", mp->id_str);
 			janus_mutex_lock(&config_mutex);
@@ -7964,19 +7992,35 @@ static void *janus_streaming_relay_thread(void *data) {
 						continue;
 					}
 
-					//todo: add rtp forwarding here and continue
-					if ( (mountpoint->do_forwarding) && (ssrc==mountpoint->forward_ssrc))
-					{
-						JANUS_LOG(LOG_DBG, "[%s] RTP ssrc=%"SCNu32" forwarded \n", name, ssrc);
+					// add rtp forwarding
+					// if ssrc in the forwarding list then forward	RTP packet and skip the rest process
+					if (mountpoint->do_forwarding)
+					{						
+						int ssrcInForwardingList = 0;
+						for (int i = 0; i < mountpoint->forward_ssrc_list_len; i++)
+						{							
+							if (mountpoint->forward_ssrc_list[i] == ssrc)
+							{
+								ssrcInForwardingList = 1;
+								break;
+							}
+						}
+						if ((ssrc==mountpoint->forward_ssrc) || ssrcInForwardingList)
+						{
+							JANUS_LOG(LOG_DBG, "[%s] RTP ssrc=%"SCNu32" forwarded \n", name, ssrc);
 
-						addrlen = sizeof(source->forward_rtp_addr);
-						if(sendto(audio_fd, buffer, bytes, 0, (struct sockaddr *)&source->forward_rtp_addr, addrlen) < 0) {
-							JANUS_LOG(LOG_HUGE, "Error forwarding RTP packet for room %s... %s (len=%d)...\n",
-							source->audio_host, g_strerror(errno), bytes);
+							addrlen = sizeof(source->forward_rtp_addr);
+							if(sendto(audio_fd, buffer, bytes, 0, (struct sockaddr *)&source->forward_rtp_addr, addrlen) < 0) {
+								JANUS_LOG(LOG_HUGE, "Error forwarding RTP packet for room %s... %s (len=%d)...\n",
+								source->audio_host, g_strerror(errno), bytes);
+							}
+
+							continue;
 						}
 
-						continue;
-					}
+					}				
+					
+					
 
                     //rchanges fix: same ssrc after delay on one IP happend. hack - change ssrc for a short period
 					if (a_last_ssrc && ssrc == a_last_ssrc && (now - source->last_received_audio)>(gint64)1000*500){
